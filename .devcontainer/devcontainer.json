@@ -1,0 +1,28 @@
+{
+  "name": "Artifact Harvester Dev",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workspace",
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+  "forwardPorts": [3000, 5173, 5432, 6379],
+  "remoteEnv": {
+    "DATABASE_URL": "postgres://artifact_harvester:artifact_harvester@postgres:5432/artifact_harvester",
+    "REDIS_URL": "redis://redis:6379",
+    "EXTRACTION_QUEUE_NAME": "artifact-harvester-extractions"
+  },
+  "postCreateCommand": "cd backend && npm install && cd ../frontend && npm install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "nestjs.nestjs-files",
+        "Vue.volar"
+      ],
+      "settings": {
+        "terminal.integrated.shellIntegration.enabled": true,
+        "editor.formatOnSave": true
+      }
+    }
+  }
+}

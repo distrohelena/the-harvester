@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  workspace:
+    image: mcr.microsoft.com/devcontainers/typescript-node:20
+    volumes:
+      - ..:/workspace:cached
+    working_dir: /workspace
+    command: sleep infinity
+    environment:
+      DATABASE_URL: postgres://artifact_harvester:artifact_harvester@postgres:5432/artifact_harvester
+      REDIS_URL: redis://redis:6379
+      EXTRACTION_QUEUE_NAME: artifact-harvester-extractions
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - '3000:3000'
+      - '5173:5173'
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: artifact_harvester
+      POSTGRES_USER: artifact_harvester
+      POSTGRES_PASSWORD: artifact_harvester
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,26 @@
+{
+    "name": "artifact-harvester-frontend",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "start:dev": "vite",
+        "build": "vite build",
+        "preview": "vite preview",
+        "lint": "eslint \"src/**/*.{ts,vue}\" --max-warnings=0"
+    },
+    "dependencies": {
+        "axios": "^1.6.0",
+        "pinia": "^2.1.4",
+        "vue": "^3.3.4",
+        "vue-router": "^4.2.5"
+    },
+    "devDependencies": {
+        "@types/node": "^20.4.0",
+        "@vitejs/plugin-vue": "^4.2.3",
+        "eslint": "^8.45.0",
+        "eslint-plugin-vue": "^9.15.1",
+        "typescript": "^5.1.3",
+        "vite": "^4.4.0"
+    }
+}
