@@ -79,20 +79,19 @@ aside li:hover {
 section {
   border: 1px solid #e5e7eb;
   border-radius: 0.5rem;
-  padding: 1rem;
+  padding: 0.75rem 0.75rem 0.75rem 0.5rem;
   background: #fff;
-  max-width: 60vw;
-  margin-left: auto;
 }
 
 pre {
   background: #0f172a;
   color: #f8fafc;
   border-radius: 0.5rem;
-  padding: 1rem;
+  padding: 0.75rem;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
+  width: 100%;
 }
 </style>

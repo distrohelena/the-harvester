@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/
 import { SourcesService } from './sources.service.js';
 import { CreateSourceDto } from './dto/create-source.dto.js';
 import { UpdateSourceDto } from './dto/update-source.dto.js';
-import { PaginationQueryDto } from '../common/dto/pagination-query.dto.js';
+import { FilterSourcesDto } from './dto/filter-sources.dto.js';
 import { PluginRegistryService } from '../plugins/plugin-registry.service.js';
 import { ExtractionQueueService } from '../extraction/queue/extraction-queue.service.js';
 
@@ -15,7 +15,7 @@ export class SourcesController {
   ) {}
 
   @Get()
-  listSources(@Query() query: PaginationQueryDto) {
+  listSources(@Query() query: FilterSourcesDto) {
     return this.sourcesService.findAll(query);
   }
 

@@ -4,7 +4,7 @@ import { FindOptionsWhere, ILike, Repository } from 'typeorm';
 import { SourceEntity } from './source.entity.js';
 import { CreateSourceDto } from './dto/create-source.dto.js';
 import { UpdateSourceDto } from './dto/update-source.dto.js';
-import { PaginationQueryDto } from '../common/dto/pagination-query.dto.js';
+import { FilterSourcesDto } from './dto/filter-sources.dto.js';
 
 @Injectable()
 export class SourcesService {
@@ -13,14 +13,20 @@ export class SourcesService {
     private readonly sourcesRepository: Repository<SourceEntity>
   ) {}
 
-  async findAll(query: PaginationQueryDto) {
-    const { page = 1, limit = 25, search } = query;
-    const where: FindOptionsWhere<SourceEntity>[] | undefined = search
-      ? [
-          { name: ILike(`%${search}%`) },
-          { pluginKey: ILike(`%${search}%`) }
-        ]
-      : undefined;
+  async findAll(query: FilterSourcesDto) {
+    const { page = 1, limit = 25, search, pluginKey } = query;
+
+    let where: FindOptionsWhere<SourceEntity>[] | FindOptionsWhere<SourceEntity> | undefined;
+
+    if (search) {
+      const base: FindOptionsWhere<SourceEntity> = pluginKey ? { pluginKey } : {};
+      where = [{ ...base, name: ILike(`%${search}%`) }];
+      if (!pluginKey) {
+        where.push({ pluginKey: ILike(`%${search}%`) });
+      }
+    } else if (pluginKey) {
+      where = { pluginKey };
+    }
 
     const [items, total] = await this.sourcesRepository.findAndCount({
       where,

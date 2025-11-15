@@ -5,6 +5,7 @@
       <nav>
         <RouterLink to="/sources">Sources</RouterLink>
         <RouterLink to="/artifacts">Artifacts</RouterLink>
+        <RouterLink to="/plugins">Plugins</RouterLink>
         <RouterLink to="/runs">Runs</RouterLink>
       </nav>
     </header>
