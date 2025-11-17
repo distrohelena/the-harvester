@@ -79,6 +79,7 @@ const VERSION_TEXT_KEYWORDS = ['documentation version', 'docs version', 'package
 const SMART_CONTENT_CANDIDATES = [
   'main',
   '[role="main"]',
+  '[role="document"]',
   'article',
   '#main-content',
   '#doc-content',
@@ -662,11 +663,13 @@ export class DocsPlugin implements Plugin {
       if (segments.length === 0) {
         return null;
       }
-      const versionSegment = segments[0];
-      if (!this.isVersionSegment(versionSegment)) {
+      const versionIndex = segments.findIndex((segment) => this.isVersionSegment(segment));
+      if (versionIndex === -1) {
         return null;
       }
-      const versionPath = `/${versionSegment}/`;
+      const versionSegment = segments[versionIndex];
+      const versionPathSegments = segments.slice(0, versionIndex + 1);
+      const versionPath = `/${versionPathSegments.join('/')}/`;
       const label = this.formatVersionLabel(versionSegment);
       return this.buildVersionDescriptor(options, label, versionPath);
     } catch {
@@ -931,23 +934,26 @@ export class DocsPlugin implements Plugin {
   }
 
   private autoDetectContentHtml($: cheerio.CheerioAPI): string | undefined {
-    type Candidate = { html: string; length: number; selector: string };
+    type Candidate = { html: string; length: number; selector: string; score: number };
     let best: Candidate | undefined;
 
     const evaluateElements = (selector: string, elements: AnyNode[]) => {
       elements.forEach((element, index) => {
-        const text = $(element).text().replace(/\s+/g, ' ').trim();
+        const node = $(element);
+        const text = node.text().replace(/\s+/g, ' ').trim();
         const length = text.length;
         if (length < 80) {
           return;
         }
-        const html = $(element).html();
+        const html = node.html();
         if (!html) {
           return;
         }
-        if (!best || length > best.length) {
-          const suffix = elements.length > 1 ? `#${index}` : '';
-          best = { html, length, selector: `${selector}${suffix}` };
+        const score = this.scoreContentCandidate(node, length, selector);
+        const suffix = elements.length > 1 ? `#${index}` : '';
+        const candidate = { html, length, selector: `${selector}${suffix}`, score };
+        if (!best || candidate.score > best.score) {
+          best = candidate;
         }
       });
     };
@@ -981,6 +987,73 @@ export class DocsPlugin implements Plugin {
     return undefined;
   }
 
+  private scoreContentCandidate(
+    node: cheerio.Cheerio<AnyNode>,
+    textLength: number,
+    selectorHint: string
+  ): number {
+    let score = textLength;
+
+    const paragraphCount = node.find('p').length;
+    const headingCount = node.find('h1, h2, h3').length;
+    const codeBlocks = node.find('pre, code').length;
+    score += paragraphCount * 30;
+    score += headingCount * 20;
+    score += Math.min(codeBlocks, 6) * 10;
+
+    const anchorNodes = node.find('a');
+    const anchorCount = anchorNodes.length;
+    const anchorTextLength = anchorNodes.text().replace(/\s+/g, ' ').trim().length;
+    const linkDensity = textLength > 0 ? anchorTextLength / textLength : 0;
+    if (linkDensity > 0.6) {
+      score -= (linkDensity - 0.6) * 300;
+    }
+    if (anchorCount > 40 && paragraphCount < 5) {
+      score -= 200;
+    }
+
+    score -= this.detectNavigationPenalty(node);
+
+    const selectorBoostTokens = ['[role="document"]', '.theme-doc-markdown', '.docMainContainer'];
+    if (selectorBoostTokens.some((token) => selectorHint.includes(token))) {
+      score += 80;
+    }
+
+    return score;
+  }
+
+  private detectNavigationPenalty(node: cheerio.Cheerio<AnyNode>): number {
+    let penalty = 0;
+    const classes = (node.attr('class') ?? '').toLowerCase();
+    const id = (node.attr('id') ?? '').toLowerCase();
+    const role = (node.attr('role') ?? '').toLowerCase();
+    const ariaLabel = (node.attr('aria-label') ?? '').toLowerCase();
+
+    const navTokens = ['sidebar', 'menu', 'navigation', 'breadcrumbs', 'breadcrumb', 'toc', 'tabs'];
+    if (node.is('nav') || role === 'navigation') {
+      penalty += 250;
+    }
+    if (navTokens.some((token) => classes.includes(token) || id.includes(token) || ariaLabel.includes(token))) {
+      penalty += 150;
+    }
+    if (node.parents('nav, [role="navigation"], .sidebar, .menu, .toc').length > 0) {
+      penalty += 100;
+    }
+
+    const listCount = node.find('ul, ol').length;
+    const paragraphCount = node.find('p').length;
+    if (listCount > paragraphCount * 3 && paragraphCount < 4) {
+      penalty += 120;
+    }
+
+    const anchorCount = node.find('a').length;
+    if (anchorCount > 80) {
+      penalty += 80;
+    }
+
+    return penalty;
+  }
+
   private collectHeadings(
     $: cheerio.CheerioAPI,
     selectors: string[]
@@ -1008,7 +1081,7 @@ export class DocsPlugin implements Plugin {
   }
 
   private sanitizeTitle(title: string): string {
-    const normalized = title.replace(/\s+/g, ' ').trim();
+    const normalized = title.replace(/¶/g, '').replace(/\s+/g, ' ').trim();
     if (!normalized) {
       return title.trim();
     }

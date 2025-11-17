@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import DocsBrowser from '../components/plugins/DocsBrowser.vue';
+import ConfluenceBrowser from '../components/plugins/ConfluenceBrowser.vue';
 import GitBrowser from '../components/plugins/GitBrowser.vue';
 
-const activeTab = ref<'docs' | 'git'>('docs');
+const activeTab = ref<'docs' | 'confluence' | 'git'>('docs');
 </script>
 
 <template>
@@ -12,6 +13,13 @@ const activeTab = ref<'docs' | 'git'>('docs');
       <button type="button" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">
         Documentation
       </button>
+      <button
+        type="button"
+        :class="{ active: activeTab === 'confluence' }"
+        @click="activeTab = 'confluence'"
+      >
+        Confluence
+      </button>
       <button type="button" :class="{ active: activeTab === 'git' }" @click="activeTab = 'git'">
         Git
       </button>
@@ -19,6 +27,7 @@ const activeTab = ref<'docs' | 'git'>('docs');
 
     <section class="tab-content">
       <DocsBrowser v-if="activeTab === 'docs'" />
+      <ConfluenceBrowser v-else-if="activeTab === 'confluence'" />
       <GitBrowser v-else />
     </section>
   </div>
