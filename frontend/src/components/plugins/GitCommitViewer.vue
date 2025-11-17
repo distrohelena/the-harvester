@@ -245,6 +245,32 @@ function downloadFile(file: FileArtifactData | undefined) {
 
 const filePreview = computed(() => buildPreview(selectedFile.value));
 
+const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico', 'avif'];
+
+function isImagePath(path?: string) {
+  if (!path) return false;
+  const ext = path.split('.').pop()?.toLowerCase();
+  return Boolean(ext && imageExtensions.includes(ext));
+}
+
+function buildImageDataUrl(file: FileArtifactData) {
+  const ext = file.path.split('.').pop()?.toLowerCase() ?? '';
+  const mimeMap: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    svg: 'image/svg+xml',
+    webp: 'image/webp',
+    bmp: 'image/bmp',
+    ico: 'image/x-icon',
+    avif: 'image/avif'
+  };
+  const mime = mimeMap[ext] ?? 'image/png';
+  const base64 = (file.content ?? '').replace(/\s+/g, '');
+  return `data:${mime};base64,${base64}`;
+}
+
 function buildTree(files: FileArtifactData[]): TreeNode[] {
   const root: Record<string, TreeNode> = {};
   files.forEach((file) => {
@@ -485,11 +511,22 @@ function renderFileIcon() {
   );
 }
 
-function buildPreview(file?: FileArtifactData) {
+type FilePreview = {
+  text: string;
+  truncated: boolean;
+  binary: boolean;
+  imageUrl?: string;
+  isImage?: boolean;
+};
+
+function buildPreview(file?: FileArtifactData): FilePreview {
   if (!file?.content) {
     return { text: '', truncated: false, binary: true };
   }
   if (file.encoding === 'base64') {
+    if (isImagePath(file.path)) {
+      return { text: '', truncated: false, binary: false, imageUrl: buildImageDataUrl(file), isImage: true };
+    }
     return { text: '', truncated: false, binary: true };
   }
   const max = 200_000;
@@ -666,7 +703,12 @@ function collapseAllDirectories() {
                 Download
               </button>
             </header>
-            <div v-if="!filePreview.binary">
+            <template v-if="filePreview.imageUrl">
+              <div class="image-preview">
+                <img :src="filePreview.imageUrl" :alt="selectedFile.path" />
+              </div>
+            </template>
+            <div v-else-if="!filePreview.binary">
               <pre>{{ filePreview.text }}</pre>
               <p v-if="filePreview.truncated" class="hint">
                 Preview truncated for large files. Download to view full content.
@@ -902,6 +944,7 @@ a {
   max-height: 380px;
   overflow: auto;
   font-size: 0.85rem;
+  text-align: left;
 }
 
 .tree ul {
@@ -929,6 +972,7 @@ a {
   padding: 0.3rem 0.4rem;
   border-radius: 0.25rem;
   display: flex;
+  justify-content: flex-start;
   align-items: center;
   gap: 0.35rem;
   font-size: 0.85rem;
@@ -936,6 +980,8 @@ a {
   transition: background 0.15s ease, color 0.15s ease;
   cursor: pointer;
   width: 100%;
+  text-align: left;
+  min-width: 0;
 }
 
 :global(.tree-node.directory) {
@@ -998,11 +1044,17 @@ a {
 :global(.node-label) {
   flex: 1;
   user-select: none;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 :global(.node-meta) {
   font-size: 0.7rem;
   color: #94a3b8;
+  white-space: nowrap;
+  margin-left: auto;
 }
 
 .preview {
@@ -1036,6 +1088,23 @@ a {
   max-width: 100%;
   width: 100%;
   word-break: break-word;
+}
+
+.image-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  padding: 0.5rem;
+}
+
+.image-preview img {
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 0.35rem;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.2);
 }
 
 .preview-empty {
