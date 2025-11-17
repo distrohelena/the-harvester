@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Plugin, PluginDescriptor } from './interfaces.js';
 import { DocsPlugin } from './docs/docs.plugin.js';
+import { ConfluencePlugin } from './confluence/confluence.plugin.js';
 import { GitPlugin } from './git/git.plugin.js';
 import { PlainWebsitePlugin } from './plain-website/plain-website.plugin.js';
 
@@ -10,10 +11,11 @@ export class PluginRegistryService {
 
   constructor(
     docsPlugin: DocsPlugin,
+    confluencePlugin: ConfluencePlugin,
     gitPlugin: GitPlugin,
     plainWebsitePlugin: PlainWebsitePlugin
   ) {
-    [docsPlugin, gitPlugin, plainWebsitePlugin].forEach((plugin) =>
+    [docsPlugin, confluencePlugin, gitPlugin, plainWebsitePlugin].forEach((plugin) =>
       this.registry.set(plugin.descriptor.key, plugin)
     );
   }

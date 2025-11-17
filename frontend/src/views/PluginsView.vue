@@ -1,24 +1,25 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import DocsBrowser from '../components/plugins/DocsBrowser.vue';
+import GitBrowser from '../components/plugins/GitBrowser.vue';
 
-const activeTab = ref<'docs'>('docs');
+const activeTab = ref<'docs' | 'git'>('docs');
 </script>
 
 <template>
   <div class="plugins-view">
     <div class="tab-bar">
-      <button
-        type="button"
-        :class="{ active: activeTab === 'docs' }"
-        @click="activeTab = 'docs'"
-      >
+      <button type="button" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">
         Documentation
+      </button>
+      <button type="button" :class="{ active: activeTab === 'git' }" @click="activeTab = 'git'">
+        Git
       </button>
     </div>
 
     <section class="tab-content">
       <DocsBrowser v-if="activeTab === 'docs'" />
+      <GitBrowser v-else />
     </section>
   </div>
 </template>
