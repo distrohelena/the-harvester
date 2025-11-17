@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import axios, { AxiosInstance, RawAxiosResponseHeaders } from 'axios';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
+import { marked } from 'marked';
 import { Plugin, PluginNavigationPayload, NormalizedArtifact, PluginExtractContext } from '../interfaces.js';
 import { SourceEntity } from '../../sources/source.entity.js';
 
@@ -754,6 +755,12 @@ export class DocsPlugin implements Plugin {
         continue;
       }
 
+      const markdownVariant = await this.maybeUseMarkdownVariant(http, url, document);
+      if (markdownVariant) {
+        url = markdownVariant.url;
+        document = markdownVariant.document;
+      }
+
       const $ = cheerio.load(document.html);
       const artifact = this.buildArtifact(version, effectivePath, $, url, document.headers, options);
       if (artifact) {
@@ -1331,11 +1338,102 @@ export class DocsPlugin implements Plugin {
   ): Promise<{ html: string; headers: RawAxiosResponseHeaders } | null> {
     return http
       .get<string>(url, { responseType: 'text' })
-      .then((response) => ({ html: response.data, headers: response.headers }))
+      .then((response) => ({
+        html: response.data,
+        headers: response.headers as RawAxiosResponseHeaders
+      }))
       .catch((error) => {
-        this.logger.warn(`DocsPlugin failed to fetch ${url}: ${error?.message ?? error}`);
+        this.logger.debug(`DocsPlugin failed to fetch ${url}: ${error instanceof Error ? error.message : error}`);
         return null;
       });
+  }
+
+  private async maybeUseMarkdownVariant(
+    http: AxiosInstance,
+    url: string,
+    document: { html: string; headers: RawAxiosResponseHeaders }
+  ): Promise<{ url: string; document: { html: string; headers: RawAxiosResponseHeaders } } | null> {
+    if (!/view as markdown/i.test(document.html)) {
+      return null;
+    }
+    const markdownUrl = this.buildMarkdownUrl(url);
+    if (!markdownUrl) {
+      return null;
+    }
+    const markdownDocument = await this.fetchMarkdownDocument(http, markdownUrl);
+    if (!markdownDocument) {
+      return null;
+    }
+    this.logger.debug(`DocsPlugin switched to markdown variant for ${markdownUrl}.`);
+    return { url: markdownUrl, document: markdownDocument };
+  }
+
+  private buildMarkdownUrl(originalUrl: string): string | null {
+    try {
+      const parsed = new URL(originalUrl);
+      if (parsed.pathname.endsWith('.md')) {
+        return parsed.toString();
+      }
+      if (parsed.pathname.endsWith('.html')) {
+        parsed.pathname = parsed.pathname.replace(/\.html?$/, '.md');
+      } else if (parsed.pathname.endsWith('/')) {
+        parsed.pathname = `${parsed.pathname}index.md`;
+      } else {
+        parsed.pathname = `${parsed.pathname}.md`;
+      }
+      return parsed.toString();
+    } catch (error) {
+      this.logger.debug(
+        `DocsPlugin could not build markdown URL from ${originalUrl}: ${error instanceof Error ? error.message : error}`
+      );
+      return null;
+    }
+  }
+
+  private async fetchMarkdownDocument(
+    http: AxiosInstance,
+    url: string
+  ): Promise<{ html: string; headers: RawAxiosResponseHeaders } | null> {
+    try {
+      const response = await http.get<string>(url, { responseType: 'text', transformResponse: (data) => data });
+      const markdown = typeof response.data === 'string' ? response.data : '';
+      const html = marked.parse(markdown);
+      const wrappedHtml = `<article class="markdown-doc">${html}</article>`;
+      const rewrittenHtml = this.rewriteRelativeUrls(wrappedHtml, url);
+      return { html: rewrittenHtml, headers: response.headers as RawAxiosResponseHeaders };
+    } catch (error) {
+      this.logger.debug(
+        `DocsPlugin failed to fetch markdown variant ${url}: ${error instanceof Error ? error.message : error}`
+      );
+      return null;
+    }
+  }
+
+  private rewriteRelativeUrls(html: string, baseUrl: string): string {
+    const $ = cheerio.load(html);
+    const rewrite = (selector: string, attribute: string) => {
+      $(selector).each((_, element) => {
+        const node = $(element);
+        const value = node.attr(attribute);
+        if (!value) {
+          return;
+        }
+        const trimmed = value.trim();
+        if (!trimmed || trimmed.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+          return;
+        }
+        try {
+          const absolute = new URL(trimmed, baseUrl).toString();
+          node.attr(attribute, absolute);
+        } catch {
+          // ignore invalid URLs
+        }
+      });
+    };
+
+    rewrite('a[href]', 'href');
+    rewrite('[src]', 'src');
+    return $.root().html() ?? html;
   }
 
   private buildExternalId(versionKey: string, path: string): string {
