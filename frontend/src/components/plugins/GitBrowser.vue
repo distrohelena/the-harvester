@@ -225,7 +225,7 @@ function commitBranches(artifact?: ArtifactModel): string[] {
           </button>
         </div>
 
-        <div class="workspace">
+        <div class="workspace" :class="{ 'commits-visible': showCommits }">
           <div class="commit-panel" :class="{ visible: showCommits }">
             <div class="commit-list">
               <div v-if="loadingArtifacts && !commits.length" class="placeholder">Loading commits…</div>
@@ -363,31 +363,42 @@ aside small {
 
 .workspace {
   display: flex;
-  gap: 1rem;
+  gap: 0;
   min-height: 400px;
   align-items: flex-start;
+  overflow: hidden;
 }
 
 .commit-panel {
-  flex: 0 0 0;
-  max-width: 0;
+  flex: 0 0 320px;
+  max-width: 320px;
+  width: 320px;
   opacity: 0;
-  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  transition: max-width 0.3s ease, flex-basis 0.3s ease, opacity 0.2s ease;
+  overflow: hidden;
+  pointer-events: none;
+  margin-right: -320px;
+  transform: translateX(-100%);
+  transition: transform 0.3s ease, opacity 0.2s ease, margin-right 0.3s ease;
 }
 
 .commit-panel.visible {
-  flex: 0 0 320px;
-  max-width: 320px;
   opacity: 1;
+  pointer-events: auto;
+  margin-right: 0;
+  transform: translateX(0);
 }
 
 .file-panel {
   flex: 1 1 auto;
-  transition: flex-basis 0.3s ease;
+  margin-left: 0;
+  transition: margin-left 0.3s ease;
+}
+
+.workspace.commits-visible .file-panel {
+  margin-left: 1rem;
 }
 
 .view-tabs {
