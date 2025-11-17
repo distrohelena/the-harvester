@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { fetchSources } from '../../api/sources';
 import { fetchArtifacts } from '../../api/artifacts';
 import type { ArtifactModel, SourceModel } from '../../types/plugins';
@@ -12,10 +12,13 @@ const state = reactive({
   loadingArtifacts: false,
   error: '' as string | undefined,
   tree: [] as DocsTreeNode[],
-  artifacts: new Map<string, ArtifactModel>()
+  artifacts: new Map<string, ArtifactModel>(),
+  pathIndex: new Map<string, string>()
 });
 
 const selectedArtifactId = ref<string>();
+const selectedAnchorSlug = ref<string>();
+const contentRef = ref<HTMLElement | null>(null);
 
 const selectedArtifact = computed(() => {
   if (!selectedArtifactId.value) return undefined;
@@ -42,6 +45,7 @@ async function loadArtifactsForSource(sourceId: string) {
   state.tree = [];
   state.artifacts.clear();
   selectedArtifactId.value = undefined;
+  selectedAnchorSlug.value = undefined;
 
   try {
     const perPage = 100;
@@ -60,7 +64,9 @@ async function loadArtifactsForSource(sourceId: string) {
     } while (collected.length < total);
 
     collected.forEach((artifact) => state.artifacts.set(artifact.id, artifact));
-    state.tree = buildTree(collected);
+    const { tree, pathIndex } = buildTree(collected);
+    state.tree = tree;
+    state.pathIndex = pathIndex;
     if (collected.length > 0) {
       selectedArtifactId.value = collected[0].id;
     }
@@ -71,8 +77,9 @@ async function loadArtifactsForSource(sourceId: string) {
   }
 }
 
-function buildTree(artifacts: ArtifactModel[]): DocsTreeNode[] {
+function buildTree(artifacts: ArtifactModel[]): { tree: DocsTreeNode[]; pathIndex: Map<string, string> } {
   const versionMap = new Map<string, DocsTreeNode>();
+  const pathIndex = new Map<string, string>();
 
   const getVersionNode = (versionLabel: string) => {
     if (!versionMap.has(versionLabel)) {
@@ -86,8 +93,14 @@ function buildTree(artifacts: ArtifactModel[]): DocsTreeNode[] {
   };
 
   artifacts.forEach((artifact) => {
-    const versionLabel = artifact.lastVersion?.data?.version ?? artifact.lastVersion?.version ?? 'latest';
-    const path = (artifact.lastVersion?.data?.path ?? '/').trim();
+    const versionLabel =
+      artifact.lastVersion?.metadata?.packageVersion ??
+      artifact.lastVersion?.data?.packageVersion ??
+      'unknown';
+    const path = normalizeDocPath(artifact.lastVersion?.data?.path);
+    if (path) {
+      pathIndex.set(path, artifact.id);
+    }
     const segments = path.split('/').filter(Boolean);
     const versionNode = getVersionNode(versionLabel);
     versionNode.children = versionNode.children ?? [];
@@ -100,11 +113,34 @@ function buildTree(artifacts: ArtifactModel[]): DocsTreeNode[] {
       if (!current.children) current.children = [];
 
       if (isLeaf) {
-        current.children.push({
+        const leaf: DocsTreeNode = {
           id: artifact.id,
           label: artifact.displayName || segment || artifact.id,
           artifactId: artifact.id
-        });
+        };
+
+        const headingsRaw = artifact.lastVersion?.data?.headings;
+        if (Array.isArray(headingsRaw) && headingsRaw.length) {
+          const headingNodes = headingsRaw
+            .map((heading: any, idx: number) => {
+              const rawText = typeof heading === 'string' ? heading : heading?.text;
+              const text = rawText?.replace(/¶/g, '').trim();
+              const anchor = typeof heading === 'string' ? undefined : heading?.anchor;
+              if (!text || !anchor) return null;
+              return {
+                id: `${artifact.id}-heading-${idx}`,
+                label: text,
+                artifactId: artifact.id,
+                anchor
+              } as DocsTreeNode;
+            })
+            .filter((node): node is DocsTreeNode => Boolean(node));
+          if (headingNodes.length) {
+            leaf.children = headingNodes;
+          }
+        }
+
+        current.children.push(leaf);
         return;
       }
 
@@ -126,17 +162,137 @@ function buildTree(artifacts: ArtifactModel[]): DocsTreeNode[] {
 
   const roots = Array.from(versionMap.values());
   sortNodes(roots);
-  return roots;
+  return { tree: roots, pathIndex };
 }
 
-function selectArtifact(id: string) {
+function normalizeDocPath(path?: string | null): string {
+  if (!path) return '/';
+  let cleaned = path.trim();
+  if (!cleaned.startsWith('/')) {
+    cleaned = `/${cleaned}`;
+  }
+  cleaned = cleaned.replace(/\/+$/, '');
+  return cleaned || '/';
+}
+
+function selectArtifact(id: string, anchor?: string) {
+  const isSameArtifact = selectedArtifactId.value === id;
   selectedArtifactId.value = id;
+  selectedAnchorSlug.value = anchor ?? undefined;
+  if (anchor) {
+    scrollToAnchor(anchor);
+  } else if (!isSameArtifact) {
+    nextTick(() => {
+      contentRef.value?.scrollTo({ top: 0, behavior: 'auto' });
+    });
+  }
 }
 
 const renderedHtml = computed(() => {
   const html = selectedArtifact.value?.lastVersion?.data?.html;
   if (!html) return '<p>No content found for this page.</p>';
   return html;
+});
+
+function scrollToAnchor(anchor: string) {
+  nextTick(() => {
+    if (!contentRef.value) return;
+    const escaped =
+      typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+        ? CSS.escape(anchor)
+        : anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const target =
+      contentRef.value.querySelector<HTMLElement>(`#${escaped}`) ??
+      contentRef.value.querySelector<HTMLElement>(`[id="${anchor}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
+}
+
+function handleContentClick(event: MouseEvent) {
+  const artifact = selectedArtifact.value;
+  if (!artifact?.lastVersion) {
+    return;
+  }
+  const target = (event.target as HTMLElement)?.closest<HTMLAnchorElement>('a');
+  if (!target) {
+    return;
+  }
+  const href = target.getAttribute('href');
+  if (!href || target.target === '_blank') {
+    return;
+  }
+  if (href.startsWith('#')) {
+    event.preventDefault();
+    const slug = href.slice(1);
+    if (slug) {
+      selectedAnchorSlug.value = slug;
+      scrollToAnchor(slug);
+    }
+    return;
+  }
+
+  const currentUrl = artifact.lastVersion.originalUrl
+    ? new URL(artifact.lastVersion.originalUrl)
+    : null;
+  if (!currentUrl) {
+    return;
+  }
+
+  let resolvedUrl: URL;
+  try {
+    resolvedUrl = new URL(href, currentUrl);
+  } catch {
+    return;
+  }
+
+  if (resolvedUrl.origin !== currentUrl.origin) {
+    return;
+  }
+
+  const normalizedPath = extractRelativePath(resolvedUrl, artifact.lastVersion.metadata?.versionBasePath);
+  if (!normalizedPath) {
+    return;
+  }
+  const targetId = state.pathIndex.get(normalizedPath);
+  if (!targetId) {
+    return;
+  }
+
+  event.preventDefault();
+  const anchor = resolvedUrl.hash ? resolvedUrl.hash.slice(1) : undefined;
+  selectArtifact(targetId, anchor);
+}
+
+function extractRelativePath(url: URL, basePath?: string | null): string | null {
+  const normalizedBase = !basePath || basePath === '/' ? '/' : basePath.endsWith('/') ? basePath : `${basePath}/`;
+  if (normalizedBase === '/') {
+    return normalizeDocPath(url.pathname);
+  }
+  const baseNoTrailing = normalizedBase.slice(0, -1);
+  if (url.pathname === baseNoTrailing) {
+    return '/';
+  }
+  if (!url.pathname.startsWith(normalizedBase)) {
+    return null;
+  }
+  const remainder = url.pathname.slice(normalizedBase.length);
+  return normalizeDocPath(remainder ? `/${remainder}` : '/');
+}
+
+watch(selectedAnchorSlug, (anchor) => {
+  if (anchor) {
+    scrollToAnchor(anchor);
+  }
+});
+
+watch(selectedArtifactId, () => {
+  if (!selectedAnchorSlug.value) {
+    nextTick(() => {
+      contentRef.value?.scrollTo({ top: 0, behavior: 'auto' });
+    });
+  }
 });
 
 onMounted(loadSources);
@@ -177,7 +333,7 @@ watch(
       <DocsTree
         :nodes="state.tree"
         :selected-artifact-id="selectedArtifactId"
-        @select="selectArtifact"
+        @select="({ artifactId, anchor }) => selectArtifact(artifactId, anchor)"
       />
     </div>
 
@@ -188,14 +344,27 @@ watch(
           <div>
             <h2>{{ selectedArtifact.displayName }}</h2>
             <p>
-              Version: {{ selectedArtifact.lastVersion?.data?.version ?? 'latest' }}
+              Version: {{ selectedArtifact.lastVersion?.version ?? '1' }}
               <span v-if="selectedArtifact.lastVersion?.metadata?.packageVersion">
                 · Package {{ selectedArtifact.lastVersion?.metadata?.packageVersion }}
               </span>
+              <a
+                v-if="selectedArtifact.lastVersion?.originalUrl"
+                :href="selectedArtifact.lastVersion.originalUrl"
+                target="_blank"
+                rel="noopener"
+              >
+                (Open original)
+              </a>
             </p>
           </div>
         </header>
-        <article class="doc-content" v-html="renderedHtml" />
+        <article
+          ref="contentRef"
+          class="doc-content"
+          v-html="renderedHtml"
+          @click="handleContentClick"
+        />
       </template>
       <p v-else class="placeholder">Select a documentation page.</p>
     </div>
@@ -245,7 +414,7 @@ watch(
 
 .tree-panel header {
   display: flex;
-  justify-content: space-between;
+  justify-content:inline;
   align-items: center;
   margin-bottom: 0.5rem;
 }
@@ -271,6 +440,64 @@ watch(
   color: #f8fafc;
   padding: 0.75rem;
   border-radius: 0.5rem;
+}
+
+.doc-content :deep(h1),
+.doc-content :deep(h2),
+.doc-content :deep(h3),
+.doc-content :deep(h4),
+.doc-content :deep(h5),
+.doc-content :deep(h6) {
+  position: relative;
+}
+
+.doc-content :deep(h1 a),
+.doc-content :deep(h2 a),
+.doc-content :deep(h3 a),
+.doc-content :deep(h4 a),
+.doc-content :deep(h5 a),
+.doc-content :deep(h6 a) {
+  opacity: 0;
+  color: inherit;
+  text-decoration: none;
+  margin-left: 0.35rem;
+  transition: opacity 0.2s ease;
+}
+
+.doc-content :deep(h1:hover a),
+.doc-content :deep(h2:hover a),
+.doc-content :deep(h3:hover a),
+.doc-content :deep(h4:hover a),
+.doc-content :deep(h5:hover a),
+.doc-content :deep(h6:hover a) {
+  opacity: 1;
+}
+
+.doc-content :deep(a.header-anchor),
+.doc-content :deep(a.anchor),
+.doc-content :deep(.hash-link) {
+  opacity: 0;
+}
+
+.doc-content :deep(h1:hover a.header-anchor),
+.doc-content :deep(h2:hover a.header-anchor),
+.doc-content :deep(h3:hover a.header-anchor),
+.doc-content :deep(h4:hover a.header-anchor),
+.doc-content :deep(h5:hover a.header-anchor),
+.doc-content :deep(h6:hover a.header-anchor),
+.doc-content :deep(h1:hover a.anchor),
+.doc-content :deep(h2:hover a.anchor),
+.doc-content :deep(h3:hover a.anchor),
+.doc-content :deep(h4:hover a.anchor),
+.doc-content :deep(h5:hover a.anchor),
+.doc-content :deep(h6:hover a.anchor),
+.doc-content :deep(h1:hover .hash-link),
+.doc-content :deep(h2:hover .hash-link),
+.doc-content :deep(h3:hover .hash-link),
+.doc-content :deep(h4:hover .hash-link),
+.doc-content :deep(h5:hover .hash-link),
+.doc-content :deep(h6:hover .hash-link) {
+  opacity: 1;
 }
 
 .placeholder {

@@ -14,14 +14,19 @@ const dataSource = new DataSource({
   entities: [SourceEntity, ArtifactEntity, ArtifactVersionEntity, ExtractionRunEntity]
 });
 
-async function resetDatabase() {
+async function resetDatabase({ truncateSources }: { truncateSources: boolean }) {
   await dataSource.initialize();
   const queryRunner = dataSource.createQueryRunner();
 
   try {
-    await queryRunner.query(
-      'TRUNCATE TABLE artifact_versions, artifacts, extraction_runs, sources RESTART IDENTITY CASCADE'
-    );
+    if (truncateSources) {
+      await queryRunner.query(
+        'TRUNCATE TABLE artifact_versions, artifacts, extraction_runs, sources RESTART IDENTITY CASCADE'
+      );
+    } else {
+      await queryRunner.query('TRUNCATE TABLE artifact_versions, artifacts RESTART IDENTITY CASCADE');
+      await queryRunner.query('TRUNCATE TABLE extraction_runs RESTART IDENTITY CASCADE');
+    }
     console.log('Database truncated successfully.');
   } finally {
     await queryRunner.release();
@@ -29,7 +34,9 @@ async function resetDatabase() {
   }
 }
 
-resetDatabase().catch((error) => {
+const shouldResetSources = process.argv.includes('--all');
+
+resetDatabase({ truncateSources: shouldResetSources }).catch((error) => {
   console.error('Failed to reset database:', error);
   process.exitCode = 1;
 });

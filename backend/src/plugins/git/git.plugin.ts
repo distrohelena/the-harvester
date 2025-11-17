@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Plugin, PluginNavigationPayload, NormalizedArtifact } from '../interfaces.js';
+import { Plugin, PluginNavigationPayload, NormalizedArtifact, PluginExtractContext } from '../interfaces.js';
 import { SourceEntity } from '../../sources/source.entity.js';
 
 @Injectable()
@@ -36,7 +36,7 @@ export class GitPlugin implements Plugin {
     }
   } as const;
 
-  async extract(_source: SourceEntity): Promise<NormalizedArtifact[]> {
+  async extract(_source: SourceEntity, _context?: PluginExtractContext): Promise<NormalizedArtifact[]> {
     this.logger.warn('GitPlugin.extract invoked without implementation – returning empty result.');
     return [];
   }

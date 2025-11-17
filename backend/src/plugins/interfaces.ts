@@ -43,8 +43,12 @@ export interface PluginNavigationPayload {
   nodes: Array<Record<string, any>>;
 }
 
+export interface PluginExtractContext {
+  emitBatch?: (artifacts: NormalizedArtifact[]) => Promise<void>;
+}
+
 export interface Plugin {
   descriptor: PluginDescriptor;
-  extract(source: SourceEntity): Promise<NormalizedArtifact[]>;
+  extract(source: SourceEntity, context?: PluginExtractContext): Promise<NormalizedArtifact[] | void>;
   buildNavigation?(sourceId: string): Promise<PluginNavigationPayload>;
 }

@@ -37,11 +37,22 @@ async function handleSubmit(event: Event) {
   if (!draft.value) return;
   loading.value = true;
   try {
-    await updateSource(id, draft.value);
+    const payload = buildUpdatePayload(draft.value);
+    await updateSource(id, payload);
     await load();
   } finally {
     loading.value = false;
   }
+}
+
+function buildUpdatePayload(sourceDraft: Partial<SourceModel>) {
+  return {
+    name: sourceDraft.name,
+    pluginKey: sourceDraft.pluginKey,
+    options: sourceDraft.options ?? {},
+    scheduleCron: sourceDraft.scheduleCron,
+    isActive: sourceDraft.isActive
+  };
 }
 
 async function triggerRun() {

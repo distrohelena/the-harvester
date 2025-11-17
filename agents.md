@@ -237,6 +237,11 @@ interface PluginSchema {
 - Trigger manual extraction
 - View run logs
 
+### Documentation & Release Notes
+- README must explain the architecture, dev setup, and how to build new plugins.
+- Keep API documentation (or at least response examples) under a `docs/` folder or similar.
+- Maintain a `CHANGELOG.md` and record all notable backend/frontend changes so downstream teams can track what shifted between releases.
+
 ---
 
 # 5. Non-Functional Requirements
@@ -274,4 +279,3 @@ interface PluginSchema {
 This system is a **unified, extensible architecture** for crawling, versioning, and exploring any kind of external data source using a plugin model. It supports scheduled extraction, universal artifact storage, dynamic configuration, and specialized navigation per plugin type.
 
 This file defines everything Codex must use to scaffold the backend, frontend, data model, plugin system, and UI behaviors.
-

@@ -37,6 +37,20 @@ const selectedVersion = computed(() =>
       <header>
         <div>
           <h2>{{ artifact.displayName }}</h2>
+          <p>
+            Version {{ selectedVersion?.version ?? '1' }}
+            <span v-if="selectedVersion?.metadata?.packageVersion">
+              · Package {{ selectedVersion?.metadata?.packageVersion }}
+            </span>
+            <a
+              v-if="selectedVersion?.originalUrl"
+              :href="selectedVersion.originalUrl"
+              target="_blank"
+              rel="noopener"
+            >
+              (Open original)
+            </a>
+          </p>
           <p>Plugin: {{ artifact.pluginKey }} · Source: {{ artifact.source.name }}</p>
         </div>
       </header>

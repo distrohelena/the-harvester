@@ -2,7 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import axios, { AxiosInstance, RawAxiosResponseHeaders } from 'axios';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
-import { Plugin, PluginNavigationPayload, NormalizedArtifact } from '../interfaces.js';
+import { Plugin, PluginNavigationPayload, NormalizedArtifact, PluginExtractContext } from '../interfaces.js';
 import { SourceEntity } from '../../sources/source.entity.js';
 
 interface DocsPluginOptions {
@@ -19,6 +19,7 @@ interface DocsPluginOptions {
   headingSelector?: string;
   maxPages?: number;
   userAgent?: string;
+  allowedDomains?: string[];
 }
 
 interface NormalizedDocsOptions {
@@ -35,14 +36,15 @@ interface NormalizedDocsOptions {
   headingSelectors: string[];
   maxPages: number;
   userAgent: string;
+  siteFlavor: 'docusaurus' | 'generic';
+  allowedOrigins: string[];
+  origin: string;
 }
 
 interface DocsVersion {
   key: string;
   label: string;
   rootUrl: string;
-  origin: string;
-  basePath: string;
 }
 
 const DEFAULT_CONTENT_SELECTORS = ['article', 'main', '#content'];
@@ -97,6 +99,14 @@ const SMART_CONTENT_CANDIDATES = [
   '.prose'
 ];
 
+const VERSION_META_SELECTORS = [
+  'meta[name="doc:version"]',
+  'meta[name="doc:current-version"]',
+  'meta[name="version"]',
+  'meta[property="og:version"]',
+  'meta[name="article:version"]'
+];
+
 @Injectable()
 export class DocsPlugin implements Plugin {
   private readonly logger = new Logger(DocsPlugin.name);
@@ -112,6 +122,12 @@ export class DocsPlugin implements Plugin {
           label: 'Version Index Path',
           type: 'string',
           description: 'Relative path that lists available versions (default: /)'
+        },
+        {
+          name: 'allowedDomains',
+          label: 'Allowed Domains',
+          type: 'array',
+          description: 'Optional additional domains to crawl (one per line, e.g. docs2.example.com)'
         },
         {
           name: 'versionSelector',
@@ -198,17 +214,9 @@ export class DocsPlugin implements Plugin {
     }
   } as const;
 
-  async extract(source: SourceEntity): Promise<NormalizedArtifact[]> {
+  async extract(source: SourceEntity, context?: PluginExtractContext): Promise<NormalizedArtifact[] | void> {
     const options = this.normalizeOptions(source.options as DocsPluginOptions);
-    const http = axios.create({
-      headers: {
-        'User-Agent': options.userAgent,
-        Accept: 'text/html,application/xhtml+xml'
-      },
-      timeout: 15000,
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400
-    });
+    const http = this.createHttpClient(options);
 
     const versions = await this.resolveVersions(options, http);
     if (versions.length === 0) {
@@ -216,10 +224,31 @@ export class DocsPlugin implements Plugin {
       return [];
     }
 
+    this.logger.log(
+      `DocsPlugin versions for source ${source.id}: ${versions
+        .map((version) => `${version.label} (${version.rootUrl})`)
+        .join(', ')}`
+    );
+
     const artifacts: NormalizedArtifact[] = [];
+    const emitBatch = async (batch: NormalizedArtifact[]) => {
+      if (!batch.length) {
+        return;
+      }
+      if (context?.emitBatch) {
+        await context.emitBatch(batch);
+      } else {
+        artifacts.push(...batch);
+      }
+    };
+
     for (const version of versions) {
       const versionArtifacts = await this.crawlVersion(version, options, http);
-      artifacts.push(...versionArtifacts);
+      await emitBatch(versionArtifacts);
+    }
+
+    if (context?.emitBatch) {
+      return;
     }
 
     return artifacts;
@@ -252,9 +281,26 @@ export class DocsPlugin implements Plugin {
             .filter(Boolean)
         : fallback;
 
-    const maxPages = raw.maxPages && Number.isFinite(raw.maxPages)
-      ? Math.min(Math.max(Number(raw.maxPages), 1), 500)
-      : 50;
+    const maxPages =
+      raw.maxPages && Number.isFinite(raw.maxPages) ? Math.max(Number(raw.maxPages), 1) : 50;
+
+    const allowedOrigins = new Set<string>();
+    let origin = '';
+    try {
+      const parsed = new URL(baseUrl);
+      origin = parsed.origin;
+      allowedOrigins.add(parsed.origin);
+    } catch {
+      // ignore
+    }
+    normalizeList(raw.allowedDomains).forEach((entry) => {
+      try {
+        const url = entry.includes('://') ? new URL(entry) : new URL(`https://${entry}`);
+        allowedOrigins.add(url.origin);
+      } catch {
+        this.logger.warn(`DocsPlugin ignored invalid allowed domain: ${entry}`);
+      }
+    });
 
     return {
       baseUrl,
@@ -269,28 +315,110 @@ export class DocsPlugin implements Plugin {
       titleSelectors: toSelectorList(raw.titleSelector, DEFAULT_TITLE_SELECTORS),
       headingSelectors: toSelectorList(raw.headingSelector, DEFAULT_HEADING_SELECTORS),
       maxPages,
-      userAgent: raw.userAgent?.trim() || 'ArtifactHarvesterDocs/1.0'
+      userAgent: raw.userAgent?.trim() || 'ArtifactHarvesterDocs/1.0',
+      siteFlavor: this.detectSiteFlavor(raw),
+      allowedOrigins: Array.from(allowedOrigins),
+      origin
     };
+  }
+
+  private detectSiteFlavor(raw: DocsPluginOptions): 'docusaurus' | 'generic' {
+    const selectors = [
+      raw.versionSelector,
+      raw.contentSelector,
+      raw.titleSelector,
+      raw.headingSelector
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+
+    if (selectors.includes('.doc-main-container') || selectors.includes('.theme-doc')) {
+      return 'docusaurus';
+    }
+
+    const url = raw.baseUrl?.toLowerCase() ?? '';
+    if (url.includes('docs.') || url.includes('docusaurus')) {
+      return 'docusaurus';
+    }
+
+    return 'generic';
+  }
+
+  private createHttpClient(options: NormalizedDocsOptions) {
+    return axios.create({
+      headers: {
+        'User-Agent': options.userAgent,
+        Accept: 'text/html,application/xhtml+xml'
+      },
+      timeout: 15000,
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 400
+    });
+  }
+
+  async listVersions(source: SourceEntity): Promise<DocsVersion[]> {
+    const options = this.normalizeOptions(source.options as DocsPluginOptions);
+    const http = this.createHttpClient(options);
+    const versions = await this.resolveVersions(options, http);
+    return versions;
   }
 
   private async resolveVersions(options: NormalizedDocsOptions, http: AxiosInstance): Promise<DocsVersion[]> {
     const manual = this.parseManualVersions(options);
     if (manual.length > 0) {
+      this.logger.debug(`DocsPlugin using ${manual.length} manually provided version(s).`);
       return manual;
     }
 
+    const detectionCandidates: Array<{ weight: number; versions: DocsVersion[] }> = [];
+
     if (options.versionSelector) {
-      const indexUrl = new URL(options.versionIndexPath || '/', options.baseUrl).toString();
-      const document = await this.fetchDocument(http, indexUrl);
-      if (document) {
-        const versions = this.scrapeVersionsFromDocument(document.html, options);
-        if (versions.length > 0) {
-          return versions;
-        }
+      const versions = await this.discoverFromSelector(options, http);
+      if (versions.length) {
+        detectionCandidates.push({ weight: 3, versions });
       }
     }
 
-    return [this.buildVersionDescriptor(options, 'latest', '/')];
+    const autoDiscovered = await this.autoDiscoverVersions(options, http);
+    if (autoDiscovered.length > 0) {
+      detectionCandidates.push({ weight: 2, versions: autoDiscovered });
+    }
+
+    const fallbackVersions = await this.fallbackVersionDiscovery(options, http);
+    if (fallbackVersions.length > 0) {
+      detectionCandidates.push({ weight: 1, versions: fallbackVersions });
+    }
+
+    if (detectionCandidates.length > 0) {
+      detectionCandidates.sort((a, b) => b.weight - a.weight);
+      const merged = new Map<string, DocsVersion>();
+      detectionCandidates.forEach(({ versions }) => {
+        versions.forEach((version) => {
+          if (!merged.has(version.rootUrl)) {
+            merged.set(version.rootUrl, version);
+          }
+        });
+      });
+      const list = Array.from(merged.values());
+      this.logger.debug(
+        `DocsPlugin discovered ${list.length} version(s): ${list.map((v) => v.label).join(', ')}`
+      );
+      return list;
+    }
+
+    const fallback = [this.buildVersionDescriptor(options, 'latest', '/')];
+    this.logger.debug('DocsPlugin falling back to default "latest" version only.');
+    return fallback;
+  }
+
+  private async discoverFromSelector(options: NormalizedDocsOptions, http: AxiosInstance) {
+    const indexUrl = new URL(options.versionIndexPath || '/', options.baseUrl).toString();
+    const document = await this.fetchDocument(http, indexUrl);
+    if (!document) {
+      return [];
+    }
+    return this.scrapeVersionsFromDocument(document.html, options);
   }
 
   private parseManualVersions(options: NormalizedDocsOptions): DocsVersion[] {
@@ -304,6 +432,260 @@ export class DocsPlugin implements Plugin {
       const path = (pathRaw ?? labelRaw ?? '/').trim();
       return this.buildVersionDescriptor(options, label || `version-${index + 1}`, path || '/');
     });
+  }
+
+  private async autoDiscoverVersions(
+    options: NormalizedDocsOptions,
+    http: AxiosInstance
+  ): Promise<DocsVersion[]> {
+    try {
+      const versions = new Map<string, DocsVersion>();
+      const seedPaths = new Set<string>();
+      seedPaths.add(options.versionIndexPath || '/');
+      try {
+        const basePath = new URL(options.baseUrl).pathname || '/';
+        seedPaths.add(basePath);
+      } catch {
+        seedPaths.add('/');
+      }
+      options.startPaths.forEach((path) => {
+        if (path?.trim()) {
+          seedPaths.add(path.trim());
+        }
+      });
+
+      for (const seed of Array.from(seedPaths).slice(0, 5)) {
+        const seedUrl = new URL(seed || '/', options.baseUrl).toString();
+        const document = await this.fetchDocument(http, seedUrl);
+        if (!document) {
+          continue;
+        }
+        this.discoverVersionsFromLinks(document.html, options).forEach((version) => {
+          versions.set(version.rootUrl, version);
+        });
+        this.discoverVersionsFromOptionLists(document.html, options).forEach((version) => {
+          if (!versions.has(version.rootUrl)) {
+            versions.set(version.rootUrl, version);
+          }
+        });
+      }
+
+      const jsonVersions = await this.discoverVersionsFromJson(options, http);
+      jsonVersions.forEach((version) => {
+        if (!versions.has(version.rootUrl)) {
+          versions.set(version.rootUrl, version);
+        }
+      });
+      const sitemapVersions = await this.discoverVersionsFromSitemap(options, http);
+      sitemapVersions.forEach((version) => {
+        if (!versions.has(version.rootUrl)) {
+          versions.set(version.rootUrl, version);
+        }
+      });
+      return Array.from(versions.values());
+    } catch (error) {
+      this.logger.debug(`Auto version discovery failed: ${error instanceof Error ? error.message : error}`);
+      return [];
+    }
+  }
+
+  private discoverVersionsFromLinks(html: string, options: NormalizedDocsOptions): DocsVersion[] {
+    const $ = cheerio.load(html);
+    const versions = new Map<string, DocsVersion>();
+
+    $('a[href]')
+      .toArray()
+      .forEach((element) => {
+        const href = $(element).attr('href');
+        const descriptor = this.buildVersionFromHref(href, options);
+        if (descriptor && !versions.has(descriptor.rootUrl)) {
+          versions.set(descriptor.rootUrl, descriptor);
+        }
+      });
+
+    return Array.from(versions.values());
+  }
+
+  private discoverVersionsFromOptionLists(html: string, options: NormalizedDocsOptions): DocsVersion[] {
+    const $ = cheerio.load(html);
+    const versions = new Map<string, DocsVersion>();
+    const addCandidate = (token?: string | null) => {
+      const cleaned = token?.trim();
+      if (!cleaned || !this.isVersionSegment(cleaned)) {
+        return;
+      }
+      const descriptor = this.buildVersionDescriptor(options, this.formatVersionLabel(cleaned), `/${cleaned}/`);
+      if (!versions.has(descriptor.rootUrl)) {
+        versions.set(descriptor.rootUrl, descriptor);
+      }
+    };
+
+    $('option').each((_, element) => {
+      const value = $(element).attr('value') ?? $(element).text();
+      addCandidate(value);
+    });
+
+    $('[data-value], [data-version]').each((_, element) => {
+      const value = $(element).attr('data-version') ?? $(element).attr('data-value');
+      addCandidate(value);
+    });
+
+    return Array.from(versions.values());
+  }
+
+  private async discoverVersionsFromJson(
+    options: NormalizedDocsOptions,
+    http: AxiosInstance
+  ): Promise<DocsVersion[]> {
+    try {
+      const base = new URL(options.baseUrl);
+      const versionsUrl = new URL('versions.json', `${base.protocol}//${base.host}`).toString();
+      const response = await http.get(versionsUrl, {
+        responseType: 'json',
+        headers: { Accept: 'application/json' }
+      });
+      const payload = response.data;
+      this.logger.debug(`DocsPlugin versions.json raw response: ${JSON.stringify(payload)}`);
+      if (!Array.isArray(payload) && typeof payload !== 'object') {
+        return [];
+      }
+      const versions: DocsVersion[] = [];
+      const entries = Array.isArray(payload) ? payload : Object.values(payload);
+      entries.forEach((entry: any) => {
+        const raw = typeof entry === 'string' ? entry : entry?.name ?? entry?.label ?? entry?.version ?? entry;
+        if (!raw || typeof raw !== 'string') {
+          return;
+        }
+        const cleaned = raw.trim();
+        if (!cleaned) {
+          return;
+        }
+        if (cleaned.toLowerCase() === 'current') {
+          versions.push(this.buildVersionDescriptor(options, 'latest', '/'));
+          return;
+        }
+        if (this.isVersionSegment(cleaned)) {
+          versions.push(this.buildVersionDescriptor(options, this.formatVersionLabel(cleaned), `/${cleaned}/`));
+        }
+      });
+      return versions;
+    } catch (error) {
+      this.logger.warn(
+        `DocsPlugin could not fetch versions.json: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return [];
+    }
+  }
+
+  private async discoverVersionsFromSitemap(
+    options: NormalizedDocsOptions,
+    http: AxiosInstance
+  ): Promise<DocsVersion[]> {
+    try {
+      const origin = new URL(options.baseUrl);
+      const url = new URL('sitemap.xml', `${origin.protocol}//${origin.host}`).toString();
+      const response = await http.get(url, { responseType: 'text', headers: { Accept: 'application/xml' } });
+      const xml = response.data as string;
+      const matches = xml.match(/<loc>(.*?)<\/loc>/g);
+      if (!matches) {
+        return [];
+      }
+      const versions = new Map<string, DocsVersion>();
+      matches.forEach((match) => {
+        const loc = match.replace(/<\/?loc>/g, '').trim();
+        try {
+          const target = new URL(loc);
+          const segments = target.pathname.split('/').filter(Boolean);
+          if (segments.length === 0) {
+            return;
+          }
+          const candidate = segments[0];
+          if (!this.isVersionSegment(candidate)) {
+            return;
+          }
+          const descriptor = this.buildVersionDescriptor(
+            options,
+            this.formatVersionLabel(candidate),
+            `/${candidate}/`
+          );
+          if (!versions.has(descriptor.rootUrl)) {
+            versions.set(descriptor.rootUrl, descriptor);
+          }
+        } catch {
+          /* ignore */
+        }
+      });
+      if (versions.size) {
+        this.logger.debug(
+          `DocsPlugin sitemap-derived versions: ${Array.from(versions.values())
+            .map((version) => version.label)
+            .join(', ')}`
+        );
+      }
+      return Array.from(versions.values());
+    } catch (error) {
+      this.logger.warn(
+        `DocsPlugin could not fetch sitemap.xml: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return [];
+    }
+  }
+
+  private async fallbackVersionDiscovery(
+    options: NormalizedDocsOptions,
+    http: AxiosInstance
+  ): Promise<DocsVersion[]> {
+    if (options.siteFlavor === 'docusaurus') {
+      const viaJson = await this.discoverVersionsFromJson(options, http);
+      if (viaJson.length > 0) {
+        return viaJson;
+      }
+    }
+    const auto = await this.autoDiscoverVersions(options, http);
+    if (auto.length > 0) {
+      return auto;
+    }
+    return [];
+  }
+
+  private buildVersionFromHref(href: string | undefined, options: NormalizedDocsOptions): DocsVersion | null {
+    if (!href) {
+      return null;
+    }
+    try {
+      const url = new URL(href, options.baseUrl);
+      const relative = url.pathname || '/';
+      if (relative === '/' || relative === options.versionIndexPath) {
+        return null;
+      }
+      const segments = relative.split('/').filter(Boolean);
+      if (segments.length === 0) {
+        return null;
+      }
+      const versionSegment = segments[0];
+      if (!this.isVersionSegment(versionSegment)) {
+        return null;
+      }
+      const versionPath = `/${versionSegment}/`;
+      const label = this.formatVersionLabel(versionSegment);
+      return this.buildVersionDescriptor(options, label, versionPath);
+    } catch {
+      return null;
+    }
+  }
+
+  private isVersionSegment(segment: string): boolean {
+    return /^v?\d+(?:\.\d+){0,3}$/.test(segment) || ['latest', 'stable', 'next'].includes(segment.toLowerCase());
+  }
+
+  private formatVersionLabel(segment: string): string {
+    if (/^v\d+/i.test(segment)) {
+      return segment.startsWith('v') ? segment : `v${segment}`;
+    }
+    if (/^\d/.test(segment)) {
+      return segment;
+    }
+    return segment;
   }
 
   private scrapeVersionsFromDocument(html: string, options: NormalizedDocsOptions): DocsVersion[] {
@@ -362,14 +744,15 @@ export class DocsPlugin implements Plugin {
       }
       visited.add(nextPath);
 
-      const url = this.buildPageUrl(version, nextPath);
-      const document = await this.fetchDocument(http, url);
+      let effectivePath = nextPath;
+      let url = this.buildPageUrl(version, nextPath);
+      let document = await this.fetchDocument(http, url);
       if (!document) {
         continue;
       }
 
       const $ = cheerio.load(document.html);
-      const artifact = this.buildArtifact(version, nextPath, $, url, document.headers, options);
+      const artifact = this.buildArtifact(version, effectivePath, $, url, document.headers, options);
       if (artifact) {
         artifacts.push(artifact);
       }
@@ -378,7 +761,7 @@ export class DocsPlugin implements Plugin {
         break;
       }
 
-      const links = this.extractLinks(version, $, options.followSelector);
+      const links = this.extractLinks(version, $, options.followSelector, url);
       for (const link of links) {
         if (!visited.has(link) && queue.length < options.maxPages * 3) {
           queue.push(link);
@@ -386,8 +769,21 @@ export class DocsPlugin implements Plugin {
       }
     }
 
+    const suffix = this.trimCommonTitleSuffix(artifacts);
+    if (suffix) {
+      artifacts.forEach((artifact) => {
+        artifact.metadata = {
+          ...(artifact.metadata ?? {}),
+          titleSuffix: suffix
+        };
+      });
+    }
+
+    const displayVersion =
+      artifacts.find((artifact) => artifact.metadata?.packageVersion)?.metadata?.packageVersion ?? version.label;
+
     this.logger.debug(
-      `DocsPlugin crawled ${artifacts.length} page(s) for ${version.label} (${version.basePath}).`
+      `DocsPlugin crawled ${artifacts.length} page(s) for version ${displayVersion} (${version.rootUrl}).`
     );
     return artifacts;
   }
@@ -400,7 +796,7 @@ export class DocsPlugin implements Plugin {
     headers: RawAxiosResponseHeaders,
     options: NormalizedDocsOptions
   ): NormalizedArtifact | null {
-    const title = this.pickFirstText($, options.titleSelectors) || 'Untitled';
+    const title = this.sanitizeTitle(this.pickFirstText($, options.titleSelectors) || 'Untitled');
     const html = this.extractContentHtml($, options);
     if (!html) {
       this.logger.debug(`DocsPlugin skipped ${url} because no content matched selectors.`);
@@ -412,20 +808,23 @@ export class DocsPlugin implements Plugin {
     const timestamp = this.extractTimestamp(headers);
     const metadata: Record<string, any> = {
       versionKey: version.key,
-      versionBasePath: version.basePath
+      versionRoot: version.rootUrl
     };
-    const packageVersion = this.detectPackageVersion($);
+    const packageVersion = this.detectPackageVersion($, title, version.label);
     if (packageVersion) {
       metadata.packageVersion = packageVersion;
     }
+    const descriptorVersion = version.label?.toLowerCase() === 'latest' ? undefined : version.label;
+    const resolvedVersion = packageVersion ?? descriptorVersion ?? 'unknown';
 
-    return {
+    const artifactPayload: NormalizedArtifact = {
       externalId: this.buildExternalId(version.key, path),
-      displayName: `${title} (${version.label})`,
-      version: version.label,
+      displayName: title,
+      version: resolvedVersion,
       data: {
         path,
-        version: version.label,
+        version: resolvedVersion,
+        packageVersion: packageVersion ?? descriptorVersion ?? 'unknown',
         title,
         html,
         text,
@@ -435,9 +834,18 @@ export class DocsPlugin implements Plugin {
       originalUrl: url,
       timestamp
     };
+
+    this.logger.debug(`DocsPlugin [${resolvedVersion}] processed ${path} (${url})`);
+
+    return artifactPayload;
   }
 
-  private extractLinks(version: DocsVersion, $: cheerio.CheerioAPI, selector: string): string[] {
+  private extractLinks(
+    version: DocsVersion,
+    $: cheerio.CheerioAPI,
+    selector: string,
+    currentUrl: string
+  ): string[] {
     const links = new Set<string>();
     $(selector)
       .toArray()
@@ -446,7 +854,7 @@ export class DocsPlugin implements Plugin {
         if (!href || href.startsWith('#')) {
           return;
         }
-        const normalized = this.normalizeLink(version, href);
+        const normalized = this.normalizeLink(version, href, currentUrl);
         if (normalized) {
           links.add(normalized);
         }
@@ -454,22 +862,40 @@ export class DocsPlugin implements Plugin {
     return Array.from(links);
   }
 
-  private normalizeLink(version: DocsVersion, href: string): string | null {
+  private normalizeLink(version: DocsVersion, href: string, currentUrl: string): string | null {
     try {
-      const absolute = new URL(href, version.rootUrl);
-      if (absolute.origin !== version.origin) {
+      const versionRoot = new URL(version.rootUrl);
+      const base = new URL(currentUrl);
+      const absolute = new URL(href, base);
+      if (absolute.origin !== versionRoot.origin) {
         return null;
       }
-      const basePath = version.basePath;
-      const candidatePath = absolute.pathname.endsWith('/')
-        ? absolute.pathname
-        : `${absolute.pathname}/`;
-      if (!candidatePath.startsWith(basePath)) {
+
+      const rootPath = versionRoot.pathname.endsWith('/')
+        ? versionRoot.pathname
+        : `${versionRoot.pathname}/`;
+      const targetPath = absolute.pathname;
+      const rootPathWithoutTrailing = rootPath === '/' ? '/' : rootPath.replace(/\/+$/, '/');
+      const rootPathBare = rootPathWithoutTrailing === '/' ? '/' : rootPathWithoutTrailing.slice(0, -1);
+
+      const matchesRoot =
+        rootPathWithoutTrailing === '/' ||
+        targetPath === rootPathBare ||
+        targetPath.startsWith(rootPathWithoutTrailing);
+      if (!matchesRoot) {
         return null;
       }
-      const remainder = candidatePath.slice(basePath.length).replace(/\/$/, '');
-      const normalized = remainder ? `/${remainder}` : '/';
-      return normalized;
+
+      if (rootPathWithoutTrailing === '/') {
+        return targetPath;
+      }
+
+      if (targetPath === rootPathBare) {
+        return '/';
+      }
+
+      const relative = targetPath.slice(rootPathWithoutTrailing.length);
+      return relative ? `/${relative}` : '/';
     } catch (error) {
       this.logger.debug(`Unable to normalize link ${href}: ${error}`);
       return null;
@@ -555,42 +981,156 @@ export class DocsPlugin implements Plugin {
     return undefined;
   }
 
-  private collectHeadings($: cheerio.CheerioAPI, selectors: string[]): string[] {
-    const headings: string[] = [];
+  private collectHeadings(
+    $: cheerio.CheerioAPI,
+    selectors: string[]
+  ): Array<{ text: string; anchor: string }> {
+    const headings: Array<{ text: string; anchor: string }> = [];
     selectors.forEach((selector) => {
       $(selector)
         .toArray()
         .forEach((element) => {
-          const text = $(element).text().trim();
-          if (text) {
-            headings.push(text);
+          const text = $(element).text().replace(/\s+/g, ' ').trim();
+          if (!text) {
+            return;
           }
+          const node = $(element);
+          const anchor =
+            node.attr('id') ??
+            node.find('[id]').attr('id') ??
+            node.find('a[id]').attr('id') ??
+            node.find('a[href^="#"]').attr('href')?.replace(/^#/, '') ??
+            this.slugify(text);
+          headings.push({ text, anchor });
         });
     });
     return headings;
   }
 
-  private detectPackageVersion($: cheerio.CheerioAPI): string | undefined {
-    for (const selector of VERSION_SELECTOR_HINTS) {
-      const node = $(selector).first();
-      if (!node || node.length === 0) {
-        continue;
-      }
-      const attrValue = this.readVersionAttribute(node);
-      if (attrValue) {
-        return attrValue;
-      }
-      const textValue = this.extractVersionFromText(node.text());
-      if (textValue) {
-        return textValue;
+  private sanitizeTitle(title: string): string {
+    const normalized = title.replace(/\s+/g, ' ').trim();
+    if (!normalized) {
+      return title.trim();
+    }
+
+    const segments = normalized
+      .split(/\s*[–—\-|•·]\s*/)
+      .map((segment) =>
+        segment
+          .replace(/\s*\((?:latest|current|stable)\)\s*$/i, '')
+          .replace(/\s*\b(?:documentation|docs)\b\s*$/i, '')
+          .trim()
+      )
+      .filter(Boolean);
+    if (segments.length <= 1) {
+      return normalized;
+    }
+
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const segment of segments) {
+      const key = segment.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(segment);
       }
     }
+
+    return deduped.join(' — ');
+  }
+
+  private trimCommonTitleSuffix(artifacts: NormalizedArtifact[]): string | undefined {
+    if (artifacts.length < 2) {
+      return undefined;
+    }
+
+    const tokenized = artifacts.map((artifact) =>
+      artifact.displayName
+        .split(/\s+/)
+        .map((token) => token.trim())
+        .filter(Boolean)
+    );
+
+    const suffixTokens: string[] = [];
+    let offset = 1;
+
+    while (true) {
+      let candidate: string | undefined;
+      for (const tokens of tokenized) {
+        const index = tokens.length - offset;
+        if (index < 0) {
+          candidate = undefined;
+          break;
+        }
+        const token = tokens[index];
+        if (!candidate) {
+          candidate = token.toLowerCase();
+        } else if (candidate !== token.toLowerCase()) {
+          candidate = undefined;
+          break;
+        }
+      }
+
+      if (!candidate) {
+        break;
+      }
+
+      const originalToken = tokenized[0][tokenized[0].length - offset];
+      suffixTokens.unshift(originalToken);
+      offset += 1;
+    }
+
+    const suffix = suffixTokens.join(' ').trim();
+    if (!suffix || suffix.length < 6) {
+      return undefined;
+    }
+
+    const suffixRegex = new RegExp(`\\s*${this.escapeRegExp(suffix)}\\s*$`, 'i');
+    artifacts.forEach((artifact) => {
+      artifact.displayName = artifact.displayName.replace(suffixRegex, '').trim();
+    });
+
+    return suffix;
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private detectPackageVersion(
+    $: cheerio.CheerioAPI,
+    title?: string,
+    descriptorLabel?: string
+  ): string | undefined {
+    type VersionCandidate = { value: string; confidence: number };
+    const candidates: VersionCandidate[] = [];
+
+    const addCandidate = (value: string | undefined, confidence: number) => {
+      const normalized = value?.trim();
+      if (!normalized || !this.looksLikeVersion(normalized)) {
+        return;
+      }
+      candidates.push({ value: normalized, confidence });
+    };
+
+    VERSION_META_SELECTORS.forEach((selector) => {
+      addCandidate($(selector).attr('content'), 4);
+    });
+
+    VERSION_SELECTOR_HINTS.forEach((selector) => {
+      const node = $(selector).first();
+      if (!node || node.length === 0) {
+        return;
+      }
+      addCandidate(this.readVersionAttribute(node), 4);
+      addCandidate(this.extractVersionFromText(node.text()), 3);
+    });
 
     const keywordNodes = $('body *')
       .toArray()
       .filter((element) => {
         const text = $(element).text().replace(/\s+/g, ' ').trim();
-        if (!text || text.length > 80) {
+        if (!text || text.length > 120) {
           return false;
         }
         const lower = text.toLowerCase();
@@ -598,13 +1138,31 @@ export class DocsPlugin implements Plugin {
       });
 
     for (const element of keywordNodes) {
-      const textValue = this.extractVersionFromText($(element).text());
-      if (textValue) {
-        return textValue;
-      }
+      addCandidate(this.extractVersionFromText($(element).text()), 2);
     }
 
-    return undefined;
+    if (title) {
+      addCandidate(this.extractVersionFromText(title), 3);
+    }
+
+    const primaryHeading = $('h1').first().text();
+    if (primaryHeading) {
+      addCandidate(this.extractVersionFromText(primaryHeading), 3);
+    }
+
+    const descriptorCandidate = descriptorLabel && descriptorLabel.toLowerCase() !== 'latest'
+      ? descriptorLabel
+      : undefined;
+    addCandidate(descriptorCandidate, 1);
+
+    candidates.sort((a, b) => {
+      if (b.confidence === a.confidence) {
+        return b.value.length - a.value.length;
+      }
+      return b.confidence - a.confidence;
+    });
+
+    return candidates[0]?.value;
   }
 
   private readVersionAttribute(node: cheerio.Cheerio<AnyNode>): string | undefined {
@@ -656,40 +1214,42 @@ export class DocsPlugin implements Plugin {
   }
 
   private normalizeRelativePath(path: string): string {
-    try {
-      const url = new URL(path, 'https://placeholder.local');
-      const cleaned = url.pathname.replace(/\/+/g, '/');
-      return cleaned || '/';
-    } catch {
-      const sanitized = path.startsWith('/') ? path : `/${path}`;
-      return sanitized.split('?')[0].split('#')[0] || '/';
-    }
+    const sanitized = path.startsWith('/') ? path : `/${path}`;
+    const cleaned = sanitized.split('?')[0].split('#')[0] || '/';
+    return cleaned === '/' ? '' : cleaned.replace(/\/+$/, '');
   }
 
   private buildPageUrl(version: DocsVersion, relativePath: string): string {
     const sanitized = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
-    return new URL(sanitized || '', version.rootUrl).toString();
+    return `${version.rootUrl}${sanitized}`;
   }
 
-  private buildVersionDescriptor(
-    options: NormalizedDocsOptions,
-    label: string,
-    path: string
-  ): DocsVersion {
-    const rootUrl = new URL(path || '/', options.baseUrl);
-    let normalizedUrl = rootUrl.toString();
-    if (!normalizedUrl.endsWith('/')) {
-      normalizedUrl = `${normalizedUrl}/`;
-    }
-    const pathname = rootUrl.pathname.endsWith('/') ? rootUrl.pathname : `${rootUrl.pathname}/`;
-    const origin = `${rootUrl.protocol}//${rootUrl.host}`;
+  private buildVersionDescriptor(options: NormalizedDocsOptions, label: string, path: string): DocsVersion {
+    const trimmedLabel = label.trim();
+    const normalizedLabel = trimmedLabel.length > 0 ? trimmedLabel : 'docs';
+    const rootUrl = this.resolveVersionRoot(options.baseUrl, path);
     return {
-      key: this.slugify(label || pathname || 'docs'),
-      label: label || pathname || 'docs',
-      rootUrl: normalizedUrl,
-      origin,
-      basePath: pathname
+      key: this.slugify(normalizedLabel),
+      label: normalizedLabel,
+      rootUrl
     };
+  }
+
+  private resolveVersionRoot(baseUrl: string, rawPath: string): string {
+    const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+    const cleanedPath = rawPath.trim();
+    if (!cleanedPath || cleanedPath === '/' || cleanedPath === '.') {
+      return normalizedBase;
+    }
+    try {
+      const resolved = new URL(cleanedPath, normalizedBase);
+      const normalized = resolved.toString();
+      return normalized.endsWith('/') ? normalized : `${normalized}/`;
+    } catch {
+      const stripped = cleanedPath.replace(/^\/+/, '');
+      const fallback = `${normalizedBase}${stripped}`;
+      return fallback.endsWith('/') ? fallback : `${fallback}/`;
+    }
   }
 
   private fetchDocument(
@@ -717,5 +1277,27 @@ export class DocsPlugin implements Plugin {
       .replace(/^-+|-+$/g, '')
       .slice(0, 48);
     return slug || 'docs';
+  }
+
+  private versionLabelToSlug(label: string): string | null {
+    const cleaned = label.trim();
+    if (!cleaned || cleaned.toLowerCase() === 'latest') {
+      return null;
+    }
+    const normalized = cleaned.replace(/^v/i, '');
+    const slug = normalized.replace(/[^a-zA-Z0-9.-]/g, '');
+    return slug || null;
+  }
+
+  private combinePaths(...parts: string[]): string {
+    const segments = parts
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+      .map((part) => part.replace(/^\/+|\/+$/g, ''))
+      .filter(Boolean);
+    if (segments.length === 0) {
+      return '/';
+    }
+    return `/${segments.join('/')}/`;
   }
 }

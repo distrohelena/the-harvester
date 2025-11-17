@@ -44,8 +44,17 @@ export class ExtractionService {
     await this.runsRepository.save(run);
 
     try {
-      const artifacts = await plugin.extract(source);
-      await this.persistArtifacts(run, source, artifacts);
+      const emitBatch = async (batch: NormalizedArtifact[]) => {
+        if (!Array.isArray(batch) || batch.length === 0) {
+          return;
+        }
+        await this.persistArtifacts(run, source, batch);
+      };
+
+      const artifactsOrVoid = await plugin.extract(source, { emitBatch });
+      if (Array.isArray(artifactsOrVoid) && artifactsOrVoid.length > 0) {
+        await this.persistArtifacts(run, source, artifactsOrVoid);
+      }
       run.status = 'SUCCESS';
       run.finishedAt = new Date();
       await this.runsRepository.save(run);
@@ -102,12 +111,20 @@ export class ExtractionService {
     const latestChecksum = artifact.lastVersion?.checksum;
     if (latestChecksum === checksum) {
       run.skippedArtifacts += 1;
+      this.logger.debug(
+        `Skipping artifact ${externalId} (source ${source.id}) because content checksum matches the latest version.`
+      );
       return;
     }
 
+    const existingVersions = await this.artifactVersionsRepository.count({
+      where: { artifact: { id: artifact.id } }
+    });
+    const localVersionLabel = String(existingVersions + 1);
+
     const versionEntity = this.artifactVersionsRepository.create({
       artifact,
-      version: normalized.version,
+      version: localVersionLabel,
       data: normalized.data,
       metadata: normalized.metadata ?? null,
       originalUrl: normalized.originalUrl ?? null,
