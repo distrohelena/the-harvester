@@ -947,16 +947,21 @@ a {
   text-align: left;
 }
 
-.tree ul {
+/* tree lists render inside render-function components, so keep selectors global */
+.tree :global(ul) {
   list-style: none;
   margin: 0;
-  padding-left: 0.4rem;
+  padding-left: 0.7rem;
   border-left: 1px solid #e2e8f0;
 }
 
-.tree > ul {
+.tree > :global(ul) {
   border-left: none;
   padding-left: 0;
+}
+
+.tree :global(li ul) {
+  padding-left: 0.7rem;
 }
 
 :global(.tree-item) {
