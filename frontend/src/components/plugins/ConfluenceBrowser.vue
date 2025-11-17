@@ -3,12 +3,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { fetchSources } from '../../api/sources';
 import { fetchArtifacts } from '../../api/artifacts';
 import type { ArtifactModel, SourceModel } from '../../types/plugins';
-
-interface SpaceGroup {
-  key: string;
-  label: string;
-  items: ArtifactModel[];
-}
+import DocsTree, { DocsTreeNode } from './DocsTree.vue';
 
 const state = reactive({
   sources: [] as SourceModel[],
@@ -39,26 +34,60 @@ const filteredArtifacts = computed(() => {
     .filter((artifact) => {
       const space = artifactSpace(artifact).toLowerCase();
       const title = artifact.displayName.toLowerCase();
-      return space.includes(query) || title.includes(query);
+      const folderPath = artifactFolderPath(artifact).toLowerCase();
+      return space.includes(query) || title.includes(query) || folderPath.includes(query);
     })
     .sort(sorter);
 });
 
-const groupedArtifacts = computed<SpaceGroup[]>(() => {
-  const groups = new Map<string, SpaceGroup>();
+const treeNodes = computed<DocsTreeNode[]>(() => {
+  if (!filteredArtifacts.value.length) {
+    return [];
+  }
+
+  const roots: DocsTreeNode[] = [];
+  const nodeMap = new Map<string, DocsTreeNode>();
+
+  const ensureNode = (id: string, label: string, parent?: DocsTreeNode) => {
+    let node = nodeMap.get(id);
+    if (!node) {
+      node = { id, label, children: [] };
+      nodeMap.set(id, node);
+      if (parent) {
+        parent.children = parent.children ?? [];
+        parent.children.push(node);
+      } else {
+        roots.push(node);
+      }
+    }
+    return node;
+  };
+
   filteredArtifacts.value.forEach((artifact) => {
     const space = artifactSpace(artifact);
-    if (!groups.has(space)) {
-      groups.set(space, { key: space, label: space, items: [] });
-    }
-    groups.get(space)!.items.push(artifact);
+    const spaceId = `space:${space}`;
+    const spaceNode = ensureNode(spaceId, space);
+    const segments = artifactPathSegments(artifact);
+    let parent = spaceNode;
+    segments.forEach((segment, index) => {
+      const key = `${parent.id}/${segment}`;
+      const node = ensureNode(key, segment, parent);
+      const isLeaf = index === segments.length - 1;
+      if (isLeaf && artifactRenderable(artifact)) {
+        node.artifactId = artifact.id;
+      }
+      parent = node;
+    });
   });
-  return Array.from(groups.values())
-    .sort((a, b) => a.label.localeCompare(b.label))
-    .map((group) => ({
-      ...group,
-      items: group.items.sort((a, b) => a.displayName.localeCompare(b.displayName))
-    }));
+
+  const sortNodes = (nodes?: DocsTreeNode[]) => {
+    if (!nodes) return;
+    nodes.sort((a, b) => a.label.localeCompare(b.label));
+    nodes.forEach((node) => sortNodes(node.children));
+  };
+
+  sortNodes(roots);
+  return roots;
 });
 
 const renderedHtml = computed(() => {
@@ -152,6 +181,31 @@ function artifactSpace(artifact: ArtifactModel): string {
   );
 }
 
+function artifactFolderPath(artifact: ArtifactModel): string {
+  return (
+    artifact.lastVersion?.metadata?.folderPath ??
+    artifact.lastVersion?.metadata?.pathSegments?.join(' / ') ??
+    ''
+  );
+}
+
+function artifactPathSegments(artifact: ArtifactModel): string[] {
+  const segments = artifact.lastVersion?.metadata?.pathSegments;
+  if (Array.isArray(segments) && segments.length) {
+    return segments.map((segment: string) => segment?.trim()).filter(Boolean);
+  }
+  const folderPath = artifactFolderPath(artifact);
+  if (folderPath) {
+    return folderPath.split('/').map((segment) => segment.trim()).filter(Boolean);
+  }
+  const display = artifact.displayName?.trim();
+  return display ? [display] : [artifact.id];
+}
+
+function artifactRenderable(artifact: ArtifactModel): boolean {
+  return artifact.lastVersion?.metadata?.isFolder !== true;
+}
+
 function selectArtifact(id: string, anchor?: string) {
   const samePage = selectedArtifactId.value === id;
   selectedArtifactId.value = id;
@@ -162,6 +216,12 @@ function selectArtifact(id: string, anchor?: string) {
     nextTick(() => {
       contentRef.value?.scrollTo({ top: 0, behavior: 'auto' });
     });
+  }
+}
+
+function handleTreeSelect(payload: { artifactId: string; anchor?: string }) {
+  if (payload?.artifactId) {
+    selectArtifact(payload.artifactId, payload.anchor);
   }
 }
 
@@ -254,27 +314,17 @@ function formatTimestamp(value?: string) {
         <input
           v-model="searchQuery"
           type="search"
-          placeholder="Search by title or space"
+          placeholder="Search by title, space, or folder"
           :disabled="state.loadingArtifacts"
         />
       </header>
       <p v-if="state.loadingArtifacts && !state.artifacts.length" class="placeholder">Loading pages…</p>
-      <template v-else-if="groupedArtifacts.length">
-        <section v-for="group in groupedArtifacts" :key="group.key" class="space-group">
-          <h4>{{ group.label }}</h4>
-          <ul>
-            <li
-              v-for="artifact in group.items"
-              :key="artifact.id"
-              :class="{ active: artifact.id === selectedArtifactId }"
-              @click="selectArtifact(artifact.id)"
-            >
-              <p>{{ artifact.displayName }}</p>
-              <small>Updated {{ formatTimestamp(artifact.lastVersion?.timestamp) }}</small>
-            </li>
-          </ul>
-        </section>
-      </template>
+      <DocsTree
+        v-else-if="treeNodes.length"
+        :nodes="treeNodes"
+        :selected-artifact-id="selectedArtifactId"
+        @select="(payload) => handleTreeSelect(payload)"
+      />
       <p v-else class="placeholder">No pages available for this source.</p>
     </div>
 
@@ -382,16 +432,6 @@ function formatTimestamp(value?: string) {
   border: 1px solid #d1d5db;
   border-radius: 0.35rem;
   padding: 0.4rem 0.6rem;
-}
-
-.space-group + .space-group {
-  margin-top: 0.75rem;
-}
-
-.space-group h4 {
-  margin: 0 0 0.35rem;
-  font-size: 0.95rem;
-  color: #374151;
 }
 
 .content-panel {

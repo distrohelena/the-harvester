@@ -61,6 +61,9 @@ interface ConfluenceContent {
     storage?: {
       value?: string;
     };
+    export_view?: {
+      value?: string;
+    };
   };
   space?: {
     key?: string;
@@ -73,12 +76,35 @@ interface ConfluenceContent {
       }>;
     };
   };
+  ancestors?: Array<{
+    id?: string;
+    title?: string;
+    type?: string;
+  }>;
   _links?: {
     webui?: string;
     tinyui?: string;
     self?: string;
     base?: string;
   };
+}
+
+interface ConfluenceChildResponse {
+  results?: Array<{
+    id: string;
+    title?: string;
+    type?: string;
+    status?: string;
+    _links?: {
+      webui?: string;
+    };
+  }>;
+  _links?: {
+    next?: string;
+  };
+  start?: number;
+  limit?: number;
+  size?: number;
 }
 
 @Injectable()
@@ -172,6 +198,10 @@ export class ConfluencePlugin implements Plugin {
     const options = this.normalizeOptions(source.options as ConfluencePluginOptions);
     const http = this.createHttpClient(options);
 
+    if (options.rootPageId) {
+      return this.extractFromPageTree(options, http, context);
+    }
+
     this.logger.log(
       `ConfluencePlugin crawling ${options.baseUrl} (space filters: ${
         options.spaceKeys.length ? options.spaceKeys.join(', ') : 'ALL'
@@ -207,6 +237,9 @@ export class ConfluencePlugin implements Plugin {
         if (page.type !== 'page') {
           continue;
         }
+        this.logger.debug(
+          `ConfluencePlugin processing search result ${page.id} ("${page.title ?? 'Untitled'}")`
+        );
         const artifact = this.buildArtifact(page, options);
         if (artifact) {
           batch.push(artifact);
@@ -231,6 +264,79 @@ export class ConfluencePlugin implements Plugin {
     return collected;
   }
 
+  private async extractFromPageTree(
+    options: NormalizedConfluenceOptions,
+    http: AxiosInstance,
+    context?: PluginExtractContext
+  ): Promise<NormalizedArtifact[] | void> {
+    this.logger.log(
+      `ConfluencePlugin crawling tree from root ${options.rootPageId} at ${options.baseUrl}`
+    );
+    const collected: NormalizedArtifact[] = [];
+    const emitBatch = async (batch: NormalizedArtifact[]) => {
+      if (!batch.length) {
+        return;
+      }
+      if (context?.emitBatch) {
+        await context.emitBatch(batch);
+      } else {
+        collected.push(...batch);
+      }
+    };
+
+    const queue: Array<{ id: string; parentId?: string; ancestors: string[] }> = [
+      { id: options.rootPageId!, parentId: undefined, ancestors: [] }
+    ];
+    const visited = new Set<string>();
+    let processed = 0;
+
+    while (queue.length > 0 && processed < options.maxPages) {
+      const current = queue.shift()!;
+      if (visited.has(current.id)) {
+        continue;
+      }
+      visited.add(current.id);
+
+      const page = await this.fetchPageById(http, current.id);
+      if (!page) {
+        continue;
+      }
+
+      this.logger.debug(
+        `ConfluencePlugin processing page ${page.id} ("${page.title ?? 'Untitled'}")`
+      );
+
+      const artifact = this.buildArtifact(page, options, {
+        allowEmptyHtml: true,
+        parentPageId: current.parentId,
+        ancestors: current.ancestors
+      });
+      if (artifact) {
+        await emitBatch([artifact]);
+        processed += 1;
+        if (processed >= options.maxPages) {
+          break;
+        }
+      }
+
+      const children = await this.fetchChildPages(http, current.id);
+      children.forEach((child) => {
+        if (!visited.has(child.id)) {
+          queue.push({
+            id: child.id,
+            parentId: page.id,
+            ancestors: [...current.ancestors, page.title || page.id]
+          });
+        }
+      });
+    }
+
+    if (context?.emitBatch) {
+      return;
+    }
+    return collected;
+  }
+
   async buildNavigation(_sourceId: string): Promise<PluginNavigationPayload> {
     return { nodes: [] };
   }
@@ -239,8 +345,7 @@ export class ConfluencePlugin implements Plugin {
     if (!raw?.baseUrl) {
       throw new BadRequestException('Confluence plugin requires baseUrl in source options');
     }
-    const trimmed = raw.baseUrl.trim();
-    const baseUrl = trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+    const baseUrl = this.normalizeBaseUrl(raw.baseUrl);
 
     const normalizeList = (value?: string | string[]): string[] => {
       if (Array.isArray(value)) {
@@ -278,10 +383,12 @@ export class ConfluencePlugin implements Plugin {
       authHeader = `Basic ${encoded}`;
     }
 
+    const rootPageId = this.normalizeRootPageId(raw.rootPageId);
+
     const searchCql = raw.cql?.trim() || this.buildDefaultCql({
       spaceKeys,
       labelFilters,
-      rootPageId: raw.rootPageId?.trim(),
+      rootPageId,
       includeArchived
     });
 
@@ -293,8 +400,32 @@ export class ConfluencePlugin implements Plugin {
       includeArchived,
       spaceKeys,
       labelFilters,
-      rootPageId: raw.rootPageId?.trim() || undefined
+      rootPageId
     };
+  }
+
+  private normalizeBaseUrl(value: string): string {
+    const ensureTrailingSlash = (input: string) => (input.endsWith('/') ? input : `${input}/`);
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return '/';
+    }
+    try {
+      const parsed = new URL(trimmed);
+      const lowerPath = parsed.pathname.toLowerCase();
+      const wikiIndex = lowerPath.indexOf('/wiki');
+      if (wikiIndex >= 0) {
+        parsed.pathname = parsed.pathname.slice(0, wikiIndex + '/wiki'.length);
+      } else if (parsed.hostname.endsWith('.atlassian.net')) {
+        parsed.pathname = '/wiki';
+      }
+      parsed.search = '';
+      parsed.hash = '';
+      const normalized = parsed.toString();
+      return ensureTrailingSlash(normalized);
+    } catch {
+      return ensureTrailingSlash(trimmed);
+    }
   }
 
   private buildDefaultCql(params: {
@@ -303,26 +434,34 @@ export class ConfluencePlugin implements Plugin {
     rootPageId?: string;
     includeArchived: boolean;
   }): string {
-    const clauses = ['type="page"'];
-    if (!params.includeArchived) {
-      clauses.push('status="current"');
-    }
+    const clauses = ['type=page'];
     if (params.spaceKeys.length === 1) {
-      clauses.push(`space="${params.spaceKeys[0]}"`);
+      clauses.push(`space=${this.formatCqlIdentifier(params.spaceKeys[0])}`);
     } else if (params.spaceKeys.length > 1) {
-      const quoted = params.spaceKeys.map((key) => `"${key}"`).join(', ');
-      clauses.push(`space in (${quoted})`);
+      const formatted = params.spaceKeys.map((key) => this.formatCqlIdentifier(key)).join(', ');
+      clauses.push(`space in (${formatted})`);
     }
     if (params.rootPageId) {
       clauses.push(`ancestor=${params.rootPageId}`);
     }
     if (params.labelFilters.length === 1) {
-      clauses.push(`label="${params.labelFilters[0]}"`);
+      clauses.push(`label=${this.formatCqlIdentifier(params.labelFilters[0])}`);
     } else if (params.labelFilters.length > 1) {
-      const labelClause = params.labelFilters.map((label) => `"${label}"`).join(', ');
+      const labelClause = params.labelFilters.map((label) => this.formatCqlIdentifier(label)).join(', ');
       clauses.push(`label in (${labelClause})`);
     }
     return clauses.join(' AND ');
+  }
+
+  private formatCqlIdentifier(value: string): string {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+      return '""';
+    }
+    if (/^[A-Za-z0-9._-]+$/.test(trimmed)) {
+      return trimmed;
+    }
+    return `"${trimmed.replace(/"/g, '\\"')}"`;
   }
 
   private createHttpClient(options: NormalizedConfluenceOptions): AxiosInstance {
@@ -355,7 +494,7 @@ export class ConfluencePlugin implements Plugin {
           cql: options.searchCql,
           limit,
           start,
-          expand: ['body.storage', 'version', 'space', 'metadata.labels'].join(',')
+          expand: ['body.storage', 'body.export_view', 'version', 'space', 'metadata.labels', 'ancestors'].join(',')
         }
       });
 
@@ -377,25 +516,105 @@ export class ConfluencePlugin implements Plugin {
         results: payload?.results ?? [],
         nextStart
       };
-    } catch (error: any) {
+    } catch (error) {
+      const details = this.extractErrorDetails(error);
       this.logger.error(
-        `Confluence search failed at start=${start}: ${error?.message ?? error}`,
-        error?.stack
+        `Confluence search failed at start=${start}: ${details}`,
+        error instanceof Error ? error.stack : undefined
       );
       return { results: [] };
     }
   }
 
-  private buildArtifact(
-    page: ConfluenceContent,
-    options: NormalizedConfluenceOptions
-  ): NormalizedArtifact | null {
-    const html = page.body?.storage?.value;
-    if (!html) {
-      this.logger.debug(`ConfluencePlugin skipped page ${page.id} because body.storage was empty.`);
+  private async fetchPageById(
+    http: AxiosInstance,
+    pageId: string
+  ): Promise<ConfluenceContent | null> {
+    try {
+      const response = await http.get<ConfluenceContent>(`rest/api/content/${pageId}`, {
+        params: {
+          expand: ['body.storage', 'body.export_view', 'version', 'space', 'metadata.labels', 'ancestors'].join(',')
+        }
+      });
+      return response.data;
+    } catch (error) {
+      const details = this.extractErrorDetails(error);
+      this.logger.warn(`ConfluencePlugin could not fetch page ${pageId}: ${details}`);
       return null;
     }
-    const text = cheerio.load(html).root().text().replace(/\s+/g, ' ').trim();
+  }
+
+  private async fetchChildPages(http: AxiosInstance, pageId: string): Promise<Array<{ id: string; title?: string }>> {
+    const children: Array<{ id: string; title?: string }> = [];
+    let start = 0;
+    const limit = 50;
+    while (start < 1000) {
+      try {
+        const response = await http.get<ConfluenceChildResponse>(`rest/api/content/${pageId}/child/page`, {
+          params: {
+            limit,
+            start
+          }
+        });
+        const payload = response.data;
+        payload.results?.forEach((result) => {
+          if (result?.id) {
+            children.push({ id: result.id, title: result.title });
+          }
+        });
+        if (!payload._links?.next || !payload.results?.length) {
+          break;
+        }
+        start += payload.results.length;
+      } catch (error) {
+        const details = this.extractErrorDetails(error);
+        this.logger.warn(`ConfluencePlugin failed to load children for ${pageId}: ${details}`);
+        break;
+      }
+    }
+    return children;
+  }
+
+  private extractErrorDetails(error: unknown): string {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      const data = error.response?.data;
+      const summary = this.safeStringify(data);
+      return `status=${status ?? 'unknown'} message=${error.message}${summary ? ` body=${summary}` : ''}`;
+    }
+    if (error instanceof Error) {
+      return error.message;
+    }
+    return String(error);
+  }
+
+  private safeStringify(value: unknown): string | undefined {
+    if (value == null) {
+      return undefined;
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private buildArtifact(
+    page: ConfluenceContent,
+    options: NormalizedConfluenceOptions,
+    extra?: { allowEmptyHtml?: boolean; parentPageId?: string; ancestors?: string[] }
+  ): NormalizedArtifact | null {
+    const rawHtml = page.body?.storage?.value ?? page.body?.export_view?.value;
+    const isFolder = !rawHtml;
+    if (!rawHtml && !extra?.allowEmptyHtml) {
+      this.logger.debug(`ConfluencePlugin skipped page ${page.id} because body content was empty.`);
+      return null;
+    }
+    const html = rawHtml ?? '';
+    const text = html ? cheerio.load(html).root().text().replace(/\s+/g, ' ').trim() : '';
     const labels =
       page.metadata?.labels?.results
         ?.map((label) => label?.name)
@@ -403,6 +622,9 @@ export class ConfluencePlugin implements Plugin {
     const versionNumber = page.version?.number ?? 1;
     const url = this.resolvePageUrl(page, options);
     const timestamp = page.version?.when;
+    const baseAncestors = extra?.ancestors ?? this.extractAncestorTitles(page);
+    const pathSegments = [...baseAncestors, page.title || `Page ${page.id}`];
+    const folderPath = baseAncestors.join(' / ');
 
     return {
       externalId: `confluence:${page.id}`,
@@ -424,7 +646,11 @@ export class ConfluencePlugin implements Plugin {
         spaceKey: page.space?.key,
         spaceName: page.space?.name,
         labels,
-        versionNumber
+        versionNumber,
+        parentPageId: extra?.parentPageId,
+        pathSegments,
+        folderPath,
+        isFolder
       },
       originalUrl: url,
       timestamp
@@ -442,4 +668,43 @@ export class ConfluencePlugin implements Plugin {
       return options.baseUrl;
     }
   }
+
+  private normalizeRootPageId(value?: string): string | undefined {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    if (/^\d+$/.test(trimmed)) {
+      return trimmed;
+    }
+    try {
+      const url = new URL(trimmed);
+      const queryId = url.searchParams.get('pageId');
+      if (queryId) {
+        return queryId;
+      }
+      const pathMatch = url.pathname.match(/\/pages\/(\d+)\//);
+      if (pathMatch?.[1]) {
+        return pathMatch[1];
+      }
+      const segments = url.pathname.split('/').filter(Boolean);
+      const numericSegment = segments.find((segment) => /^\d+$/.test(segment));
+      if (numericSegment) {
+        return numericSegment;
+      }
+    } catch {
+      // ignore
+    }
+    return trimmed;
+  }
+
+  private extractAncestorTitles(page: ConfluenceContent): string[] {
+    if (!Array.isArray(page.ancestors) || !page.ancestors.length) {
+      return [];
+    }
+    return page.ancestors
+      .map((ancestor) => ancestor.title?.trim() || ancestor.id)
+      .filter((value): value is string => Boolean(value));
+  }
+
 }
