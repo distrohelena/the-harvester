@@ -16,10 +16,33 @@ const loadingFiles = ref(false);
 const pagination = ref({ page: 1, limit: 25, total: 0 });
 const viewMode = ref<'files' | 'commits'>('files');
 const showCommits = computed(() => viewMode.value === 'commits');
+const branchFilter = ref<string | null>(null);
+const branchMenuOpen = ref(false);
 
 const selectedSource = computed(() => sources.value.find((source) => source.id === selectedSourceId.value));
-const commits = computed(() => artifacts.value.filter(isCommitArtifact));
-const selectedArtifact = computed(() => commits.value.find((artifact) => artifact.id === selectedArtifactId.value));
+const allCommits = computed(() => artifacts.value.filter(isCommitArtifact));
+const availableBranches = computed(() => {
+  const uniqueBranches = new Set<string>();
+  for (const artifact of allCommits.value) {
+    for (const branch of commitBranches(artifact)) {
+      const trimmed = branch.trim();
+      if (trimmed) {
+        uniqueBranches.add(trimmed);
+      }
+    }
+  }
+  return Array.from(uniqueBranches).sort((a, b) => a.localeCompare(b));
+});
+const filteredCommits = computed(() => {
+  if (!branchFilter.value) {
+    return allCommits.value;
+  }
+  return allCommits.value.filter((artifact) => commitBranches(artifact).includes(branchFilter.value as string));
+});
+const branchButtonLabel = computed(() => (branchFilter.value ? `Branch: ${branchFilter.value}` : 'Show Branches'));
+const selectedArtifact = computed(() =>
+  filteredCommits.value.find((artifact) => artifact.id === selectedArtifactId.value)
+);
 const selectedVersion = computed<ArtifactVersionModel | undefined>(() => selectedArtifact.value?.lastVersion);
 const hasMoreCommits = ref(false);
 const hasMore = computed(() => hasMoreCommits.value);
@@ -28,7 +51,7 @@ onMounted(async () => {
   await loadSources();
 });
 
-watch(commits, async (next) => {
+watch(filteredCommits, async (next) => {
   if (!next.length) {
     selectedArtifactId.value = undefined;
     fileArtifacts.value = [];
@@ -44,6 +67,8 @@ watch(commits, async (next) => {
 watch(selectedSourceId, async (next) => {
   if (next) {
     viewMode.value = 'files';
+    branchFilter.value = null;
+    branchMenuOpen.value = false;
     await loadCommits(next);
   } else {
     artifacts.value = [];
@@ -79,8 +104,9 @@ async function loadCommits(sourceId: string, append = false) {
     artifacts.value = append ? [...artifacts.value, ...nextItems] : nextItems;
     hasMoreCommits.value = response.page * response.limit < response.total;
     if (!append) {
-      selectedArtifactId.value = artifacts.value[0]?.id;
-      await loadFilesForCommit(artifacts.value[0]);
+      const nextCommit = filteredCommits.value[0];
+      selectedArtifactId.value = nextCommit?.id;
+      await loadFilesForCommit(nextCommit);
     }
   } finally {
     loadingArtifacts.value = false;
@@ -121,13 +147,22 @@ function loadMore() {
 
 async function selectArtifact(id: string) {
   selectedArtifactId.value = id;
-  const artifact = commits.value.find((item) => item.id === id);
+  const artifact = filteredCommits.value.find((item) => item.id === id);
   await loadFilesForCommit(artifact);
   viewMode.value = 'files';
 }
 
 function toggleCommits() {
   viewMode.value = viewMode.value === 'commits' ? 'files' : 'commits';
+}
+
+function toggleBranchMenu() {
+  branchMenuOpen.value = !branchMenuOpen.value;
+}
+
+function selectBranchFilter(branch?: string) {
+  branchFilter.value = branch ?? null;
+  branchMenuOpen.value = false;
 }
 
 function formatDate(value?: string) {
@@ -171,7 +206,21 @@ function shortHash(artifact?: ArtifactModel) {
 function commitBranches(artifact?: ArtifactModel): string[] {
   const version = artifact?.lastVersion;
   const branches: unknown = (version?.data as any)?.branches;
-  return Array.isArray(branches) ? branches : [];
+  if (!Array.isArray(branches)) {
+    return [];
+  }
+  return branches
+    .filter((branch): branch is string => typeof branch === 'string')
+    .map((branch) => branch.trim())
+    .filter(Boolean);
+}
+
+function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
+  const branches = commitBranches(artifact);
+  if (branchFilter.value) {
+    return branches.filter((branch) => branch === branchFilter.value);
+  }
+  return branches;
 }
 </script>
 
@@ -223,16 +272,41 @@ function commitBranches(artifact?: ArtifactModel): string[] {
           <button type="button" :class="{ active: showCommits }" @click="toggleCommits">
             {{ showCommits ? 'Hide Commits' : 'View Commits' }}
           </button>
+          <div class="branch-filter">
+            <button
+              type="button"
+              :class="{ active: branchMenuOpen || !!branchFilter }"
+              @click="toggleBranchMenu"
+            >
+              {{ branchButtonLabel }}
+            </button>
+            <div v-if="branchMenuOpen" class="branch-menu">
+              <button type="button" :class="{ active: !branchFilter }" @click="selectBranchFilter()">
+                All branches
+              </button>
+              <button
+                type="button"
+                v-for="branch in availableBranches"
+                :key="branch"
+                :class="{ active: branchFilter === branch }"
+                @click="selectBranchFilter(branch)"
+              >
+                {{ branch }}
+              </button>
+            </div>
+          </div>
         </div>
 
         <div class="workspace" :class="{ 'commits-visible': showCommits }">
           <div class="commit-panel" :class="{ visible: showCommits }">
             <div class="commit-list">
-              <div v-if="loadingArtifacts && !commits.length" class="placeholder">Loading commits…</div>
-              <div v-else-if="!commits.length" class="placeholder">No commits found for this source.</div>
+              <div v-if="loadingArtifacts && !filteredCommits.length" class="placeholder">Loading commits…</div>
+              <div v-else-if="!filteredCommits.length" class="placeholder">
+                {{ branchFilter ? 'No commits found for this branch.' : 'No commits found for this source.' }}
+              </div>
               <ul v-else>
                 <li
-                  v-for="artifact in commits"
+                  v-for="artifact in filteredCommits"
                   :key="artifact.id"
                   :class="{ active: artifact.id === selectedArtifactId }"
                   @click="selectArtifact(artifact.id)"
@@ -242,8 +316,8 @@ function commitBranches(artifact?: ArtifactModel): string[] {
                     <p class="meta">
                       {{ commitAuthor(artifact) }} · {{ formatDate(artifact.lastVersion?.createdAt) }}
                     </p>
-                    <div class="branches">
-                      <span v-for="branch in commitBranches(artifact)" :key="branch">{{ branch }}</span>
+                    <div class="branches" v-if="commitBranchesForDisplay(artifact).length">
+                      <span v-for="branch in commitBranchesForDisplay(artifact)" :key="branch">{{ branch }}</span>
                     </div>
                   </div>
                   <span class="hash">{{ shortHash(artifact) }}</span>
@@ -286,7 +360,9 @@ function commitBranches(artifact?: ArtifactModel): string[] {
                 :show-changes="false"
               />
               <p v-else-if="loadingArtifacts" class="placeholder">Loading repository files…</p>
-              <p v-else class="placeholder">No commits available for this source.</p>
+              <p v-else class="placeholder">
+                {{ branchFilter ? 'No commits match the selected branch.' : 'No commits available for this source.' }}
+              </p>
             </div>
           </div>
         </div>
@@ -425,6 +501,40 @@ aside small {
   background: #1d4ed8;
   color: #fff;
   border-color: #1d4ed8;
+}
+
+.branch-filter {
+  position: relative;
+}
+
+.branch-menu {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.15);
+  padding: 0.5rem;
+  min-width: 200px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.branch-menu button {
+  border: 1px solid transparent;
+  border-radius: 0.35rem;
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.branch-menu button.active {
+  background: #eef2ff;
+  border-color: #c7d2fe;
 }
 
 .commit-list {
