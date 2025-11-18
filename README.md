@@ -8,7 +8,8 @@ This repo follows the `AGENTS.md` specification for a plugin-driven artifact ext
 /mnt/c/dev/harvester
 ├── agents.md                # Project specification (do not edit)
 ├── backend/                 # NestJS application
-└── frontend/                # Vite + Vue 3 SPA
+├── frontend/                # Vite + Vue 3 SPA
+└── mcp/                     # MCP server (HTTP + stdio) exposing harvested artifacts
 ```
 
 ### Backend Highlights
@@ -25,6 +26,15 @@ This repo follows the `AGENTS.md` specification for a plugin-driven artifact ext
 - **Plugin navigation views** (`DocsNavigationView`, `GitNavigationView`, `PlainWebsiteNavigationView`) rendered through a `NavigationRenderer` based on plugin-provided navigation schema.
 - Dedicated **Runs dashboard** for monitoring extraction progress.
 
+### MCP Server Highlights
+- Lives in `mcp/` and uses the official `@modelcontextprotocol/sdk`.
+- **Streamable HTTP** endpoint (default) plus optional **stdio** mode for local hosts.
+- Tools:
+  - `list-sources` to enumerate thousands of projects with plugin key + activity flags.
+  - `search-artifacts` with cursor-based pagination across names, metadata, and plugin info.
+- Resource template `artifact://{artifactId}` exposes formatted summaries and raw metadata for any artifact with autocomplete + recent listings.
+- Configurable via env vars (`DATABASE_URL`, `MCP_HTTP_PORT`, etc.) so you can deploy it alongside the backend and let MCP clients query every indexed project.
+
 ## Getting Started
 1. **Install dependencies**
    ```bash
@@ -39,6 +49,7 @@ This repo follows the `AGENTS.md` specification for a plugin-driven artifact ext
 3. **Run services**
    - Backend: `npm run start:dev` from `backend/`.
    - Frontend: `npm run dev` from `frontend/` (proxies `/api` → `http://localhost:3000`).
+   - MCP server: `cd mcp && npm run build && npm start` for HTTP mode, or `MCP_TRANSPORT=stdio npm run dev` for local stdio integrations.
 
 BullMQ workers run inside the backend process (see `ExtractionProcessor`). Use `POST /sources/:id/run` or the frontend “Run Now” button to queue jobs.
 
@@ -80,5 +91,6 @@ No extra configuration is required—just point it at a Jira tenant and the extr
 - Harden validation (per-field option validation, JSON schema, etc.).
 - Add authentication/authorization if needed.
 - Build automated tests (unit + integration) around services and Vue stores/components.
+- Expand MCP integrations by adding more specialized tools if clients need direct JSON payloads or aggregation views per project.
 
 Refer to `agents.md` for the canonical requirements.
