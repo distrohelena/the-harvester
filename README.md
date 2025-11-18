@@ -14,7 +14,7 @@ This repo follows the `AGENTS.md` specification for a plugin-driven artifact ext
 ### Backend Highlights
 - **NestJS + TypeORM** with entities for Sources, Artifacts, ArtifactVersions, and ExtractionRuns.
 - **BullMQ queue** (`artifact-harvester-extractions`) schedules extraction jobs through `ExtractionQueueService` and `ExtractionProcessor` workers.
-- **Plugin system** with registry-provided descriptors and placeholder extractors for `docs`, `git`, and `plain_website` plugins.
+- **Plugin system** with registry-provided descriptors and extractors for `docs`, `confluence`, `git`, `jira`, and `plain_website` plugins.
 - **REST API** matching `AGENTS.md`: `/plugins`, `/sources`, `/artifacts`, `/runs`, `/sources/:id/run`, `/sources/:id/navigation`, etc.
 - **Extraction pipeline** (`ExtractionService`) normalizes plugin output, computes checksums, versions artifacts, and records run statistics.
 
@@ -65,6 +65,15 @@ The `docs` plugin now understands versioned documentation portals:
 - **Content extraction:** customize `contentSelector`, `titleSelector`, and `headingSelector` (comma-separated selectors) to match each site.
 
 This makes it easy to point the harvester at frameworks whose docs publish multiple live versions (e.g., `/docs/v2`, `/docs/v3`). Each scraped page becomes an artifact keyed by version so you can diff and browse per release.
+
+## Jira Plugin
+The `jira` plugin mirrors the workflow used in the standalone Jira VS Code extension: supply the Jira site URL plus your user email + API token and the harvester automatically:
+
+- Discovers every accessible project through Jira's REST API.
+- Pulls the latest issues for each project (up to 200 per project) with their summary, status, assignee, labels, and timestamps.
+- Builds navigation grouped by project → status, so you can browse tickets the same way as the editor integration.
+
+No extra configuration is required—just point it at a Jira tenant and the extractor handles pagination, legacy endpoint fallbacks, and artifact normalization. On the frontend the **Plugins → Jira** tab lists sources, renders projects/issues, and links directly back to Jira for deeper actions.
 
 ## Next Steps
 - Implement real extraction logic inside the git and plain_website plugins.

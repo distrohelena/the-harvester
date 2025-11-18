@@ -3,8 +3,9 @@ import { ref } from 'vue';
 import DocsBrowser from '../components/plugins/DocsBrowser.vue';
 import ConfluenceBrowser from '../components/plugins/ConfluenceBrowser.vue';
 import GitBrowser from '../components/plugins/GitBrowser.vue';
+import JiraBrowser from '../components/plugins/JiraBrowser.vue';
 
-const activeTab = ref<'docs' | 'confluence' | 'git'>('docs');
+const activeTab = ref<'docs' | 'confluence' | 'git' | 'jira'>('docs');
 </script>
 
 <template>
@@ -23,12 +24,16 @@ const activeTab = ref<'docs' | 'confluence' | 'git'>('docs');
       <button type="button" :class="{ active: activeTab === 'git' }" @click="activeTab = 'git'">
         Git
       </button>
+      <button type="button" :class="{ active: activeTab === 'jira' }" @click="activeTab = 'jira'">
+        Jira
+      </button>
     </div>
 
     <section class="tab-content">
       <DocsBrowser v-if="activeTab === 'docs'" />
       <ConfluenceBrowser v-else-if="activeTab === 'confluence'" />
-      <GitBrowser v-else />
+      <GitBrowser v-else-if="activeTab === 'git'" />
+      <JiraBrowser v-else />
     </section>
   </div>
 </template>

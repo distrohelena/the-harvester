@@ -4,6 +4,7 @@ import { DocsPlugin } from './docs/docs.plugin.js';
 import { ConfluencePlugin } from './confluence/confluence.plugin.js';
 import { GitPlugin } from './git/git.plugin.js';
 import { PlainWebsitePlugin } from './plain-website/plain-website.plugin.js';
+import { JiraPlugin } from './jira/jira.plugin.js';
 
 @Injectable()
 export class PluginRegistryService {
@@ -13,9 +14,10 @@ export class PluginRegistryService {
     docsPlugin: DocsPlugin,
     confluencePlugin: ConfluencePlugin,
     gitPlugin: GitPlugin,
-    plainWebsitePlugin: PlainWebsitePlugin
+    plainWebsitePlugin: PlainWebsitePlugin,
+    jiraPlugin: JiraPlugin
   ) {
-    [docsPlugin, confluencePlugin, gitPlugin, plainWebsitePlugin].forEach((plugin) =>
+    [docsPlugin, confluencePlugin, gitPlugin, plainWebsitePlugin, jiraPlugin].forEach((plugin) =>
       this.registry.set(plugin.descriptor.key, plugin)
     );
   }
