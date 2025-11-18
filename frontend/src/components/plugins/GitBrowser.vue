@@ -39,7 +39,15 @@ const filteredCommits = computed(() => {
   }
   return allCommits.value.filter((artifact) => commitBranches(artifact).includes(branchFilter.value as string));
 });
-const branchButtonLabel = computed(() => (branchFilter.value ? `Branch: ${branchFilter.value}` : 'Show Branches'));
+const branchButtonLabel = computed(() => {
+  if (branchFilter.value) {
+    return `Branch: ${branchFilter.value}`;
+  }
+  if (availableBranches.value.length === 0) {
+    return 'No branches';
+  }
+  return 'Select Branch';
+});
 const selectedArtifact = computed(() =>
   filteredCommits.value.find((artifact) => artifact.id === selectedArtifactId.value)
 );
@@ -49,6 +57,16 @@ const hasMore = computed(() => hasMoreCommits.value);
 
 onMounted(async () => {
   await loadSources();
+});
+
+watch(availableBranches, (branches) => {
+  if (!branches.length) {
+    branchFilter.value = null;
+    return;
+  }
+  if (!branchFilter.value || !branches.includes(branchFilter.value)) {
+    branchFilter.value = branches[0];
+  }
 });
 
 watch(filteredCommits, async (next) => {
@@ -160,8 +178,8 @@ function toggleBranchMenu() {
   branchMenuOpen.value = !branchMenuOpen.value;
 }
 
-function selectBranchFilter(branch?: string) {
-  branchFilter.value = branch ?? null;
+function selectBranchFilter(branch: string) {
+  branchFilter.value = branch;
   branchMenuOpen.value = false;
 }
 
@@ -281,9 +299,6 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
               {{ branchButtonLabel }}
             </button>
             <div v-if="branchMenuOpen" class="branch-menu">
-              <button type="button" :class="{ active: !branchFilter }" @click="selectBranchFilter()">
-                All branches
-              </button>
               <button
                 type="button"
                 v-for="branch in availableBranches"

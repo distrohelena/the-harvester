@@ -30,10 +30,23 @@ interface JiraArtifactData {
   changelog?: Array<Record<string, any>>;
 }
 
+interface JiraArtifactMetadata {
+  projectKey?: string;
+  projectName?: string;
+  status?: string;
+  issueKey?: string;
+}
+
+const ALL_PROJECTS_KEY = '__all__';
+const UNKNOWN_PROJECT_KEY = '__unknown__';
+
 const sources = ref<SourceModel[]>([]);
 const issues = ref<ArtifactModel[]>([]);
 const selectedSourceId = ref<string>();
 const selectedIssueId = ref<string>();
+const selectedProjectKey = ref<string>(ALL_PROJECTS_KEY);
+const projectPanelOpen = ref(false);
+const projectSearch = ref('');
 const loadingSources = ref(false);
 const loadingIssues = ref(false);
 const errorMessage = ref<string>();
@@ -48,14 +61,66 @@ const selectedIssue = computed(() =>
 const selectedIssueData = computed<JiraArtifactData | undefined>(
   () => selectedIssue.value?.lastVersion?.data as JiraArtifactData | undefined
 );
+const selectedIssueMetadata = computed<JiraArtifactMetadata | undefined>(
+  () => selectedIssue.value?.lastVersion?.metadata as JiraArtifactMetadata | undefined
+);
 const hasMore = computed(() => pagination.value.page * pagination.value.limit < pagination.value.total);
+interface ProjectOption {
+  key: string;
+  label: string;
+}
+const projectOptions = computed<ProjectOption[]>(() => {
+  const map = new Map<string, ProjectOption>();
+  for (const issue of issues.value) {
+    const projectKey = issueProjectKey(issue) ?? UNKNOWN_PROJECT_KEY;
+    if (!map.has(projectKey)) {
+      map.set(projectKey, {
+        key: projectKey,
+        label: issueProjectLabel(issue, projectKey)
+      });
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+});
+const filteredIssues = computed(() => {
+  if (!issues.value.length) return [];
+  if (!selectedProjectKey.value || selectedProjectKey.value === ALL_PROJECTS_KEY) {
+    return issues.value;
+  }
+  return issues.value.filter((issue) => {
+    const projectKey = issueProjectKey(issue) ?? UNKNOWN_PROJECT_KEY;
+    return projectKey === selectedProjectKey.value;
+  });
+});
+const selectedProjectLabel = computed(() => {
+  if (selectedProjectKey.value === ALL_PROJECTS_KEY || !projectOptions.value.length) {
+    return 'All projects';
+  }
+  const selected = projectOptions.value.find((option) => option.key === selectedProjectKey.value);
+  return selected?.label ?? selectedProjectKey.value ?? 'All projects';
+});
+const visibleProjectOptions = computed(() => {
+  if (!projectOptions.value.length) {
+    return [];
+  }
+  const term = projectSearch.value.trim().toLowerCase();
+  if (!term) {
+    return projectOptions.value;
+  }
+  return projectOptions.value.filter((option) => {
+    return (
+      option.label.toLowerCase().includes(term) ||
+      (option.key ?? '').toLowerCase().includes(term)
+    );
+  });
+});
 
 onMounted(async () => {
   await loadSources();
 });
 
 watch(
-  issues,
+  filteredIssues,
   (next) => {
     if (!next.length) {
       selectedIssueId.value = undefined;
@@ -73,13 +138,43 @@ watch(
   selectedSourceId,
   async (next, prev) => {
     if (next && next !== prev) {
+      selectedProjectKey.value = ALL_PROJECTS_KEY;
+      projectPanelOpen.value = false;
+      projectSearch.value = '';
       await loadIssues(next);
     } else if (!next) {
       issues.value = [];
+      selectedProjectKey.value = ALL_PROJECTS_KEY;
+      projectPanelOpen.value = false;
+      projectSearch.value = '';
     }
   },
   { immediate: true }
 );
+
+watch(
+  projectOptions,
+  (next) => {
+    if (!next.length) {
+      selectedProjectKey.value = ALL_PROJECTS_KEY;
+      projectPanelOpen.value = false;
+      return;
+    }
+    if (
+      selectedProjectKey.value !== ALL_PROJECTS_KEY &&
+      !next.some((project) => project.key === selectedProjectKey.value)
+    ) {
+      selectedProjectKey.value = next[0].key;
+    }
+  },
+  { immediate: true }
+);
+
+watch(projectPanelOpen, (next) => {
+  if (!next) {
+    projectSearch.value = '';
+  }
+});
 
 function issueUpdatedTimestamp(issue?: ArtifactModel) {
   if (!issue) return 0;
@@ -137,9 +232,6 @@ async function loadIssues(sourceId: string, append = false) {
       total: response.total
     };
     issues.value = append ? sortIssues([...issues.value, ...response.items]) : sortIssues(response.items);
-    if (!append && response.items.length > 0) {
-      selectedIssueId.value = response.items[0].id;
-    }
   } catch (error: any) {
     errorMessage.value = error?.message ?? 'Failed to load Jira issues';
   } finally {
@@ -157,6 +249,38 @@ function loadMore() {
   if (selectedSourceId.value && hasMore.value && !loadingIssues.value) {
     loadIssues(selectedSourceId.value, true);
   }
+}
+
+function toggleProjectPanel() {
+  projectPanelOpen.value = !projectPanelOpen.value;
+}
+
+function selectProject(key?: string) {
+  selectedProjectKey.value = key ?? ALL_PROJECTS_KEY;
+  projectPanelOpen.value = false;
+}
+
+function issueMetadata(issue?: ArtifactModel): JiraArtifactMetadata {
+  return (issue?.lastVersion?.metadata ?? {}) as JiraArtifactMetadata;
+}
+
+function issueProjectKey(issue?: ArtifactModel) {
+  const data = issue?.lastVersion?.data as JiraArtifactData | undefined;
+  const metadata = issueMetadata(issue);
+  return data?.project?.key ?? metadata.projectKey ?? undefined;
+}
+
+function issueProjectLabel(issue?: ArtifactModel, fallbackKey?: string) {
+  const data = issue?.lastVersion?.data as JiraArtifactData | undefined;
+  const metadata = issueMetadata(issue);
+  const label = projectLabel(data, metadata);
+  if (label === 'Unknown') {
+    if (fallbackKey && fallbackKey !== UNKNOWN_PROJECT_KEY) {
+      return fallbackKey;
+    }
+    return 'Unknown project';
+  }
+  return label;
 }
 
 function issueStatus(issue?: ArtifactModel) {
@@ -179,9 +303,14 @@ function issueKey(issue?: ArtifactModel) {
   return data?.key ?? issue?.displayName ?? issue?.id;
 }
 
-function projectLabel(data?: JiraArtifactData) {
-  if (!data?.project?.key) return 'Unknown';
-  return data.project.name ? `${data.project.key} – ${data.project.name}` : data.project.key;
+function projectLabel(data?: JiraArtifactData, metadata?: JiraArtifactMetadata) {
+  const projectKey = data?.project?.key ?? metadata?.projectKey;
+  const projectName = data?.project?.name ?? metadata?.projectName;
+  if (!projectKey && !projectName) return 'Unknown';
+  if (!projectKey) {
+    return projectName ?? 'Unknown';
+  }
+  return projectName ? `${projectKey} – ${projectName}` : projectKey;
 }
 
 function formatDate(value?: string) {
@@ -241,99 +370,159 @@ function renderDescription(description?: string) {
         </div>
       </header>
 
+      <div v-if="projectOptions.length" class="project-controls">
+        <button
+          type="button"
+          class="ghost"
+          :class="{ active: projectPanelOpen }"
+          @click="toggleProjectPanel"
+        >
+          {{ projectPanelOpen ? 'Hide Projects' : 'View Projects' }}
+        </button>
+        <p class="current-project">
+          Showing:
+          <strong>{{ selectedProjectLabel }}</strong>
+        </p>
+      </div>
+
       <div v-if="errorMessage" class="error-banner">
         {{ errorMessage }}
       </div>
 
-      <div class="issues-content">
-        <div class="issue-list">
-          <p v-if="!issues.length && !loadingIssues" class="placeholder">
-            No Jira artifacts found for this source.
-          </p>
-          <p v-else-if="loadingIssues && !issues.length" class="placeholder">Loading issues…</p>
-          <ul>
-            <li
-              v-for="issue in issues"
-              :key="issue.id"
-              :class="{ active: issue.id === selectedIssueId }"
-              @click="selectedIssueId = issue.id"
-            >
-              <div class="issue-row">
-                <div>
-                  <strong>{{ issueKey(issue) }}</strong>
-                  <p>{{ issueSummary(issue) }}</p>
-                </div>
-                <div class="issue-meta">
-                  <span class="badge">{{ issueStatus(issue) }}</span>
-                  <small>{{ issueAssignee(issue) }}</small>
-                </div>
-              </div>
-            </li>
-          </ul>
-        </div>
-
-        <div class="issue-details" v-if="selectedIssue">
+      <div class="issues-workspace" :class="{ 'projects-visible': projectPanelOpen }">
+        <aside class="project-panel" :class="{ open: projectPanelOpen }" aria-label="Jira projects list">
           <header>
             <div>
-              <p class="issue-key">{{ selectedIssueData?.key }}</p>
-              <h4>{{ selectedIssueData?.summary ?? selectedIssue.displayName }}</h4>
+              <h4>Projects</h4>
+              <small>{{ projectOptions.length }} total</small>
             </div>
-            <div class="badges">
-              <span class="badge primary">{{ selectedIssueData?.status ?? 'Unknown' }}</span>
-              <span class="badge">{{ selectedIssueData?.issueType ?? 'Issue' }}</span>
-              <span class="badge">{{ selectedIssueData?.priority ?? 'Unprioritized' }}</span>
-            </div>
+            <button type="button" class="ghost" @click="projectPanelOpen = false">Close</button>
           </header>
-          <ul class="chips">
-            <li v-for="label in selectedIssueData?.labels ?? []" :key="label">{{ label }}</li>
-          </ul>
-          <p class="project-label">Project: {{ projectLabel(selectedIssueData) }}</p>
-          <article class="description">
-            {{ renderDescription(selectedIssueData?.description) }}
-          </article>
-          <dl class="meta-grid">
-            <div>
-              <dt>Assignee</dt>
-              <dd>{{ selectedIssueData?.assignee?.displayName ?? 'Unassigned' }}</dd>
-            </div>
-            <div>
-              <dt>Reporter</dt>
-              <dd>{{ selectedIssueData?.reporter?.displayName ?? 'Unknown' }}</dd>
-            </div>
-            <div>
-              <dt>Story Points</dt>
-              <dd>{{ selectedIssueData?.storyPoints ?? '—' }}</dd>
-            </div>
-            <div>
-              <dt>Sprint</dt>
-              <dd>{{ selectedIssueData?.sprint?.name ?? '—' }}</dd>
-            </div>
-            <div>
-              <dt>Created</dt>
-              <dd>{{ formatDate(selectedIssueData?.createdAt) }}</dd>
-            </div>
-            <div>
-              <dt>Updated</dt>
-              <dd>{{ formatDate(selectedIssueData?.updatedAt) }}</dd>
-            </div>
-          </dl>
-          <div v-if="selectedIssueData?.comments?.length" class="comments">
-            <h5>Recent comments</h5>
-            <ul>
-              <li v-for="comment in selectedIssueData.comments" :key="comment.id">
-                <p class="comment-author">
-                  {{ comment.author?.displayName ?? 'Unknown' }}
-                  <small>{{ formatDate(comment.createdAt) }}</small>
-                </p>
-                <p>{{ comment.body }}</p>
+          <input
+            type="search"
+            v-model="projectSearch"
+            placeholder="Search projects"
+            :disabled="!projectOptions.length"
+          />
+          <div class="project-list">
+            <button
+              type="button"
+              :class="{ active: selectedProjectKey === ALL_PROJECTS_KEY }"
+              @click="selectProject()"
+            >
+              <span>All projects</span>
+              <small>Any</small>
+            </button>
+            <button
+              type="button"
+              v-for="option in visibleProjectOptions"
+              :key="option.key"
+              :class="{ active: selectedProjectKey === option.key }"
+              @click="selectProject(option.key)"
+            >
+              <span>{{ option.label }}</span>
+              <small>{{ option.key }}</small>
+            </button>
+            <p v-if="projectOptions.length && !visibleProjectOptions.length" class="placeholder">
+              No matching projects.
+            </p>
+          </div>
+        </aside>
+
+        <div class="issues-content">
+          <div class="issue-list">
+            <p v-if="!filteredIssues.length && !loadingIssues" class="placeholder">
+              {{
+                selectedProjectKey === ALL_PROJECTS_KEY
+                  ? 'No Jira artifacts found for this source.'
+                  : 'No Jira artifacts found for this project.'
+              }}
+            </p>
+            <p v-else-if="loadingIssues && !issues.length" class="placeholder">Loading issues…</p>
+            <ul v-else>
+              <li
+                v-for="issue in filteredIssues"
+                :key="issue.id"
+                :class="{ active: issue.id === selectedIssueId }"
+                @click="selectedIssueId = issue.id"
+              >
+                <div class="issue-row">
+                  <div>
+                    <strong>{{ issueKey(issue) }}</strong>
+                    <p>{{ issueSummary(issue) }}</p>
+                  </div>
+                  <div class="issue-meta">
+                    <span class="badge">{{ issueStatus(issue) }}</span>
+                    <small>{{ issueAssignee(issue) }}</small>
+                  </div>
+                </div>
               </li>
             </ul>
           </div>
-          <p class="issue-link" v-if="selectedIssueData?.url">
-            <a :href="selectedIssueData.url" target="_blank" rel="noopener noreferrer">Open in Jira ↗</a>
-          </p>
+
+          <div class="issue-details" v-if="selectedIssue">
+            <header>
+              <div>
+                <p class="issue-key">{{ selectedIssueData?.key }}</p>
+                <h4>{{ selectedIssueData?.summary ?? selectedIssue.displayName }}</h4>
+              </div>
+              <div class="badges">
+                <span class="badge primary">{{ selectedIssueData?.status ?? 'Unknown' }}</span>
+                <span class="badge">{{ selectedIssueData?.issueType ?? 'Issue' }}</span>
+                <span class="badge">{{ selectedIssueData?.priority ?? 'Unprioritized' }}</span>
+              </div>
+            </header>
+            <ul class="chips">
+              <li v-for="label in selectedIssueData?.labels ?? []" :key="label">{{ label }}</li>
+            </ul>
+            <p class="project-label">Project: {{ projectLabel(selectedIssueData, selectedIssueMetadata) }}</p>
+            <article class="description">
+              {{ renderDescription(selectedIssueData?.description) }}
+            </article>
+            <dl class="meta-grid">
+              <div>
+                <dt>Assignee</dt>
+                <dd>{{ selectedIssueData?.assignee?.displayName ?? 'Unassigned' }}</dd>
+              </div>
+              <div>
+                <dt>Reporter</dt>
+                <dd>{{ selectedIssueData?.reporter?.displayName ?? 'Unknown' }}</dd>
+              </div>
+              <div>
+                <dt>Story Points</dt>
+                <dd>{{ selectedIssueData?.storyPoints ?? '—' }}</dd>
+              </div>
+              <div>
+                <dt>Sprint</dt>
+                <dd>{{ selectedIssueData?.sprint?.name ?? '—' }}</dd>
+              </div>
+              <div>
+                <dt>Created</dt>
+                <dd>{{ formatDate(selectedIssueData?.createdAt) }}</dd>
+              </div>
+              <div>
+                <dt>Updated</dt>
+                <dd>{{ formatDate(selectedIssueData?.updatedAt) }}</dd>
+              </div>
+            </dl>
+            <div v-if="selectedIssueData?.comments?.length" class="comments">
+              <h5>Recent comments</h5>
+              <ul>
+                <li v-for="comment in selectedIssueData.comments" :key="comment.id">
+                  <p class="comment-author">
+                    {{ comment.author?.displayName ?? 'Unknown' }}
+                    <small>{{ formatDate(comment.createdAt) }}</small>
+                  </p>
+                  <p>{{ comment.body }}</p>
+                </li>
+              </ul>
+            </div>
+            <p class="issue-link" v-if="selectedIssueData?.url">
+              <a :href="selectedIssueData.url" target="_blank" rel="noopener noreferrer">Open in Jira ↗</a>
+            </p>
+          </div>
+          <div v-else class="issue-details placeholder">Select an issue to see details.</div>
         </div>
-        <div v-else class="issue-details placeholder">Select an issue to see details.</div>
       </div>
     </section>
   </div>
@@ -420,11 +609,119 @@ aside li.active {
   color: #991b1b;
 }
 
+.project-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.project-controls .current-project {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #4b5563;
+}
+
+.project-controls .ghost.active {
+  background: #1d4ed8;
+  color: #fff;
+  border-color: #1d4ed8;
+}
+
+
+.issues-workspace {
+  position: relative;
+  min-height: 360px;
+}
+
+.issues-workspace.projects-visible .issues-content {
+  margin-left: 300px;
+}
+
+.project-panel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 280px;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  background: #fff;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  transform: translateX(-110%);
+  opacity: 0;
+  visibility: hidden;
+  transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out, opacity 0.2s ease-in-out;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.project-panel.open {
+  transform: translateX(0);
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.15);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.project-panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.project-panel header h4 {
+  margin: 0;
+}
+
+.project-panel input[type='search'] {
+  border: 1px solid #d1d5db;
+  border-radius: 0.375rem;
+  padding: 0.4rem 0.6rem;
+}
+
+.project-list {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  overflow-y: auto;
+}
+
+.project-list button {
+  border: 1px solid transparent;
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  background: #f8fafc;
+  cursor: pointer;
+}
+
+.project-list button.active {
+  border-color: #1d4ed8;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.project-list button small {
+  color: #6b7280;
+}
+
 .issues-content {
   display: grid;
   grid-template-columns: 320px 1fr;
   gap: 1rem;
   min-height: 360px;
+  transition: margin-left 0.2s ease-in-out;
 }
 
 .issue-list ul {

@@ -223,11 +223,15 @@ export class ConfluencePlugin implements Plugin {
     const pageSize = 25;
     let start = 0;
     let processed = 0;
+    const processedIds = new Set<string>();
+
+    let stoppedDueToMissingNext = false;
+    let stoppedDueToApiLimit = false;
 
     while (processed < options.maxPages) {
       const remaining = options.maxPages - processed;
       const limit = Math.min(pageSize, remaining);
-      const { results, nextStart } = await this.searchContent(http, options, start, limit);
+      const { results, nextStart, hasNextPage } = await this.searchContent(http, options, start, limit);
       if (!results.length) {
         break;
       }
@@ -237,6 +241,10 @@ export class ConfluencePlugin implements Plugin {
         if (page.type !== 'page') {
           continue;
         }
+        if (!page.id || processedIds.has(page.id)) {
+          continue;
+        }
+        processedIds.add(page.id);
         this.logger.debug(
           `ConfluencePlugin processing search result ${page.id} ("${page.title ?? 'Untitled'}")`
         );
@@ -253,9 +261,34 @@ export class ConfluencePlugin implements Plugin {
       await emitBatch(batch);
 
       if (!nextStart || processed >= options.maxPages) {
+        if (!nextStart && hasNextPage) {
+          stoppedDueToMissingNext = true;
+        } else if (!hasNextPage && results.length === limit && processed < options.maxPages) {
+          stoppedDueToApiLimit = true;
+        }
         break;
       }
       start = nextStart;
+    }
+
+    this.logger.log(
+      `ConfluencePlugin processed ${processed} page(s) (maxPages=${options.maxPages}).`
+    );
+
+    if (stoppedDueToMissingNext) {
+      this.logger.warn(
+        'ConfluencePlugin stopped early because the API did not include a usable next page link. Consider reducing filters or retrying with smaller maxPages.'
+      );
+    } else if (stoppedDueToApiLimit) {
+      this.logger.warn(
+        'ConfluencePlugin likely hit Confluence search result limits before reaching maxPages. Narrow the search (space/labels/cql) or use rootPageId to crawl smaller sections.'
+      );
+    }
+
+    if (processed >= options.maxPages) {
+      this.logger.warn(
+        `ConfluencePlugin reached maxPages limit (${options.maxPages}). Increase maxPages in the source options to scan additional pages.`
+      );
     }
 
     if (context?.emitBatch) {
@@ -360,17 +393,28 @@ export class ConfluencePlugin implements Plugin {
       return [];
     };
 
-    const spaceKeys = normalizeList(raw.spaceKeys);
+    const rawSpaceKeys = normalizeList(raw.spaceKeys);
     if (raw.spaceKey?.trim()) {
-      spaceKeys.push(raw.spaceKey.trim());
+      rawSpaceKeys.push(raw.spaceKey.trim());
+    }
+    const normalizedSpaceKeys: string[] = [];
+    const seenSpaceKeys = new Set<string>();
+    for (const key of rawSpaceKeys) {
+      const normalizedKey = key.toUpperCase();
+      if (seenSpaceKeys.has(normalizedKey)) {
+        continue;
+      }
+      seenSpaceKeys.add(normalizedKey);
+      normalizedSpaceKeys.push(key);
     }
     const labelFilters = normalizeList(raw.labelFilters);
 
     const includeArchived = Boolean(raw.includeArchived);
-    const maxPages =
-      raw.maxPages && Number.isFinite(raw.maxPages)
-        ? Math.max(1, Math.min(1000, Number(raw.maxPages)))
-        : 200;
+    const maxPagesInput =
+      raw.maxPages && Number.isFinite(raw.maxPages) ? Number(raw.maxPages) : undefined;
+    const maxPages = maxPagesInput
+      ? Math.max(1, Math.min(5000, Math.trunc(maxPagesInput)))
+      : 2000;
 
     let authHeader: string | undefined;
     const pat = raw.personalAccessToken?.trim();
@@ -386,7 +430,7 @@ export class ConfluencePlugin implements Plugin {
     const rootPageId = this.normalizeRootPageId(raw.rootPageId);
 
     const searchCql = raw.cql?.trim() || this.buildDefaultCql({
-      spaceKeys,
+      spaceKeys: normalizedSpaceKeys,
       labelFilters,
       rootPageId,
       includeArchived
@@ -398,7 +442,7 @@ export class ConfluencePlugin implements Plugin {
       searchCql,
       maxPages,
       includeArchived,
-      spaceKeys,
+      spaceKeys: normalizedSpaceKeys,
       labelFilters,
       rootPageId
     };
@@ -487,7 +531,7 @@ export class ConfluencePlugin implements Plugin {
     options: NormalizedConfluenceOptions,
     start: number,
     limit: number
-  ): Promise<{ results: ConfluenceContent[]; nextStart?: number }> {
+  ): Promise<{ results: ConfluenceContent[]; nextStart?: number; hasNextPage: boolean }> {
     try {
       const response = await http.get<ConfluenceSearchResponse>('rest/api/content/search', {
         params: {
@@ -499,6 +543,7 @@ export class ConfluencePlugin implements Plugin {
       });
 
       const payload = response.data;
+      const hasNextPage = Boolean(payload?._links?.next);
       let nextStart: number | undefined;
       if (payload?._links?.next) {
         try {
@@ -514,7 +559,8 @@ export class ConfluencePlugin implements Plugin {
 
       return {
         results: payload?.results ?? [],
-        nextStart
+        nextStart,
+        hasNextPage
       };
     } catch (error) {
       const details = this.extractErrorDetails(error);
@@ -522,7 +568,7 @@ export class ConfluencePlugin implements Plugin {
         `Confluence search failed at start=${start}: ${details}`,
         error instanceof Error ? error.stack : undefined
       );
-      return { results: [] };
+      return { results: [], hasNextPage: false };
     }
   }
 

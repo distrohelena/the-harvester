@@ -169,12 +169,21 @@ export class GitPlugin implements Plugin {
       for (const commitHash of commits) {
         const branches = Array.from(branchMap.get(commitHash) ?? []);
         const commitMetadata = await this.readCommitMetadata(repoPath, commitHash);
-        const snapshotEntries = await this.readCommitSnapshot(repoPath, commitHash);
+        const changes = await this.readCommitChanges(repoPath, commitHash);
+        const snapshotEntries = await this.readCommitSnapshot(repoPath, changes);
+        const snapshotMap = new Map(snapshotEntries.map((entry) => [entry.path, entry]));
         const fileArtifacts = snapshotEntries.map((entry) =>
           this.buildFileArtifact(entry, commitHash, options, branches, commitMetadata)
         );
-        const snapshotMap = new Map(snapshotEntries.map((entry) => [entry.path, entry]));
-        const changes = await this.readCommitChanges(repoPath, commitHash, snapshotMap);
+        changes.forEach((change) => {
+          if (change.status === 'D') {
+            return;
+          }
+          const snapshot = snapshotMap.get(change.path);
+          if (snapshot) {
+            change.size = snapshot.size;
+          }
+        });
         const commitArtifact = this.buildCommitArtifact(
           commitHash,
           options,
@@ -472,39 +481,29 @@ export class GitPlugin implements Plugin {
 
   private async readCommitSnapshot(
     repoPath: string,
-    commitHash: string
+    changes: CommitFileChange[]
   ): Promise<SnapshotEntry[]> {
-    const lsOutput = await this.runGit(
-      ['ls-tree', '-r', '--full-tree', '--long', commitHash],
-      { cwd: repoPath }
-    );
-    const entries = lsOutput
-      .toString('utf8')
-      .split('\n')
-      .map((line) => line.trimEnd())
-      .filter(Boolean)
-      .map((line) => line.match(/^(\d+)\s+(\w+)\s+([0-9a-f]{40})\s+(\d+)\t(.+)$/))
-      .filter((match): match is RegExpMatchArray => Boolean(match))
-      .map((match) => ({
-        mode: match[1],
-        type: match[2],
-        sha: match[3],
-        size: Number(match[4]),
-        path: match[5]
-      }))
-      .filter((entry) => entry.type === 'blob');
-
+    if (!changes?.length) {
+      return [];
+    }
     const files: SnapshotEntry[] = [];
-    for (const entry of entries) {
-      const buffer = await this.runGit(['cat-file', 'blob', entry.sha], {
+    for (const change of changes) {
+      if (
+        change.status === 'D' ||
+        !change.blobSha ||
+        this.isZeroSha(change.blobSha)
+      ) {
+        continue;
+      }
+      const buffer = await this.runGit(['cat-file', 'blob', change.blobSha], {
         cwd: repoPath,
         encoding: 'buffer'
       });
       files.push({
-        path: entry.path,
-        mode: entry.mode,
-        size: entry.size,
-        blobSha: entry.sha,
+        path: change.path,
+        mode: change.mode ?? '100644',
+        size: buffer.length,
+        blobSha: change.blobSha,
         buffer
       });
     }
@@ -513,8 +512,7 @@ export class GitPlugin implements Plugin {
 
   private async readCommitChanges(
     repoPath: string,
-    commitHash: string,
-    snapshotMap: Map<string, SnapshotEntry>
+    commitHash: string
   ): Promise<CommitFileChange[]> {
     const diffOutput = await this.runGit(
       ['diff-tree', '--root', '--find-renames', '--find-copies', '--always', '-z', commitHash],
@@ -535,11 +533,6 @@ export class GitPlugin implements Plugin {
         mode: isDeletion ? entry.oldMode : entry.newMode,
         previousMode: entry.oldMode
       };
-
-      if (!isDeletion && !this.isZeroSha(entry.newSha)) {
-        const snapshot = snapshotMap.get(pathValue);
-        change.size = snapshot?.size ?? change.size;
-      }
 
       files.push(change);
     }

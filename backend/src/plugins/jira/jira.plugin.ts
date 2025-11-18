@@ -503,9 +503,11 @@ export class JiraPlugin implements Plugin {
     const url = `${baseUrl}/browse/${issue.key}`;
     const comments = this.extractComments(fields.comment);
 
+    const displayName = this.truncateString(`${issue.key}: ${summary}`, 255);
+
     return {
       externalId: issue.id,
-      displayName: `${issue.key}: ${summary}`,
+      displayName,
       version: fields.updated ? `${issue.id}:${fields.updated}` : issue.id,
       data: {
         key: issue.key,
@@ -554,6 +556,20 @@ export class JiraPlugin implements Plugin {
       originalUrl: url,
       timestamp: fields.updated ?? fields.created
     };
+  }
+
+  private truncateString(input: unknown, maxLength: number): string {
+    if (typeof input !== 'string') {
+      if (input === undefined || input === null) {
+        return '';
+      }
+      const fallback = String(input);
+      return fallback.length > maxLength ? fallback.slice(0, maxLength) : fallback;
+    }
+    if (maxLength <= 0) {
+      return '';
+    }
+    return input.length > maxLength ? input.slice(0, maxLength) : input;
   }
 
   private extractComments(raw: unknown): Array<Record<string, any>> {
