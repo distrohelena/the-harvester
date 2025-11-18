@@ -169,7 +169,7 @@ export class ConfluencePlugin implements Plugin {
           name: 'maxPages',
           label: 'Max Pages',
           type: 'number',
-          description: 'Stops crawling after this many pages (default: 200)'
+          description: 'Optional limit for how many pages to crawl. Leave blank to crawl everything.'
         }
       ]
     },
@@ -299,7 +299,7 @@ export class ConfluencePlugin implements Plugin {
       );
     }
 
-    if (processed >= options.maxPages) {
+    if (Number.isFinite(options.maxPages) && processed >= options.maxPages) {
       this.logger.warn(
         `ConfluencePlugin reached maxPages limit (${options.maxPages}). Increase maxPages in the source options to scan additional pages.`
       );
@@ -426,9 +426,8 @@ export class ConfluencePlugin implements Plugin {
     const includeArchived = Boolean(raw.includeArchived);
     const maxPagesInput =
       raw.maxPages && Number.isFinite(raw.maxPages) ? Number(raw.maxPages) : undefined;
-    const maxPages = maxPagesInput
-      ? Math.max(1, Math.min(5000, Math.trunc(maxPagesInput)))
-      : 2000;
+    const maxPages =
+      maxPagesInput !== undefined ? Math.max(1, Math.trunc(maxPagesInput)) : Number.POSITIVE_INFINITY;
 
     let authHeader: string | undefined;
     const pat = raw.personalAccessToken?.trim();
