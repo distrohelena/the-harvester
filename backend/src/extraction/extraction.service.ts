@@ -65,6 +65,10 @@ export class ExtractionService {
       run.errorMessage = error?.message ?? 'Unknown error';
       await this.runsRepository.save(run);
       throw error;
+    } finally {
+      this.logger.log(
+        `[HARVESTER COMPLETE] Source ${source.id} run ${run.id} finished with status ${run.status} (created=${run.createdArtifacts}, updated=${run.updatedArtifacts}, skipped=${run.skippedArtifacts}).`
+      );
     }
 
     return run;

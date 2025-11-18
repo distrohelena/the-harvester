@@ -224,6 +224,7 @@ export class ConfluencePlugin implements Plugin {
     let start = 0;
     let processed = 0;
     const processedIds = new Set<string>();
+    let nextLink: string | undefined;
 
     let stoppedDueToMissingNext = false;
     let stoppedDueToApiLimit = false;
@@ -231,7 +232,11 @@ export class ConfluencePlugin implements Plugin {
     while (processed < options.maxPages) {
       const remaining = options.maxPages - processed;
       const limit = Math.min(pageSize, remaining);
-      const { results, nextStart, hasNextPage } = await this.searchContent(http, options, start, limit);
+      const { results, nextPageLink, hasNextPage, fallbackNextStart } = await this.searchContent(http, options, {
+        start: nextLink ? undefined : start,
+        limit,
+        nextLink
+      });
       if (!results.length) {
         break;
       }
@@ -260,15 +265,24 @@ export class ConfluencePlugin implements Plugin {
 
       await emitBatch(batch);
 
-      if (!nextStart || processed >= options.maxPages) {
-        if (!nextStart && hasNextPage) {
+      if (processed >= options.maxPages) {
+        break;
+      }
+
+      if (!nextPageLink) {
+        if (hasNextPage && typeof fallbackNextStart === 'number' && fallbackNextStart > start) {
+          nextLink = undefined;
+          start = fallbackNextStart;
+          continue;
+        }
+        if (hasNextPage) {
           stoppedDueToMissingNext = true;
         } else if (!hasNextPage && results.length === limit && processed < options.maxPages) {
           stoppedDueToApiLimit = true;
         }
         break;
       }
-      start = nextStart;
+      nextLink = nextPageLink;
     }
 
     this.logger.log(
@@ -529,43 +543,44 @@ export class ConfluencePlugin implements Plugin {
   private async searchContent(
     http: AxiosInstance,
     options: NormalizedConfluenceOptions,
-    start: number,
-    limit: number
-  ): Promise<{ results: ConfluenceContent[]; nextStart?: number; hasNextPage: boolean }> {
+    pagination: { start?: number; limit: number; nextLink?: string }
+  ): Promise<{
+    results: ConfluenceContent[];
+    nextPageLink?: string;
+    hasNextPage: boolean;
+    fallbackNextStart?: number;
+  }> {
     try {
-      const response = await http.get<ConfluenceSearchResponse>('rest/api/content/search', {
-        params: {
-          cql: options.searchCql,
-          limit,
-          start,
-          expand: ['body.storage', 'body.export_view', 'version', 'space', 'metadata.labels', 'ancestors'].join(',')
-        }
-      });
+      const { start, limit, nextLink } = pagination;
+      const endpoint = nextLink ?? 'rest/api/content/search';
+      const response = await http.get<ConfluenceSearchResponse>(endpoint, nextLink
+        ? undefined
+        : {
+            params: {
+              cql: options.searchCql,
+              limit,
+              start,
+              expand: ['body.storage', 'body.export_view', 'version', 'space', 'metadata.labels', 'ancestors'].join(',')
+            }
+          });
 
       const payload = response.data;
       const hasNextPage = Boolean(payload?._links?.next);
-      let nextStart: number | undefined;
-      if (payload?._links?.next) {
-        try {
-          const nextUrl = new URL(payload._links.next, options.baseUrl);
-          const nextStartParam = nextUrl.searchParams.get('start');
-          if (nextStartParam) {
-            nextStart = Number(nextStartParam);
-          }
-        } catch {
-          nextStart = start + (payload.results?.length ?? 0);
-        }
-      }
-
+      const nextPageLink = payload?._links?.next;
+      const fallbackNextStart =
+        typeof payload?.start === 'number'
+          ? payload.start + (payload.limit ?? payload.results?.length ?? limit)
+          : undefined;
       return {
         results: payload?.results ?? [],
-        nextStart,
-        hasNextPage
+        nextPageLink,
+        hasNextPage,
+        fallbackNextStart
       };
     } catch (error) {
       const details = this.extractErrorDetails(error);
       this.logger.error(
-        `Confluence search failed at start=${start}: ${details}`,
+        `Confluence search failed at start=${pagination.start ?? 0}: ${details}`,
         error instanceof Error ? error.stack : undefined
       );
       return { results: [], hasNextPage: false };
