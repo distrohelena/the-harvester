@@ -64,7 +64,17 @@ function getValue(field: PluginSchemaField) {
     <div v-for="field in schema.fields" :key="field.name" class="form-field">
       <label :for="field.name">{{ field.label }} <span v-if="field.required">*</span></label>
       <small v-if="field.description">{{ field.description }}</small>
-      <template v-if="field.type === 'string' || field.type === 'number'">
+      <template v-if="field.type === 'string' && field.multiline">
+        <textarea
+          :id="field.name"
+          rows="6"
+          :disabled="isDisabled"
+          :required="field.required"
+          :value="getValue(field)"
+          @input="updateField(field, ($event.target as HTMLTextAreaElement).value)"
+        />
+      </template>
+      <template v-else-if="field.type === 'string' || field.type === 'number'">
         <input
           :id="field.name"
           :type="field.type === 'number' ? 'number' : 'text'"

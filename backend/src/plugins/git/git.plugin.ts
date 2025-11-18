@@ -1,7 +1,7 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
-import { mkdtemp, rm } from 'fs/promises';
+import { chmod, mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import {
@@ -14,9 +14,9 @@ import { SourceEntity } from '../../sources/source.entity.js';
 
 interface GitPluginOptions {
   repoUrl?: string;
-  branch?: string;
-  branches?: string[];
+  branches?: string | string[];
   authToken?: string;
+  sshPrivateKey?: string;
 }
 
 interface NormalizedGitOptions {
@@ -24,6 +24,7 @@ interface NormalizedGitOptions {
   primaryBranch: string;
   branchFilter: string[];
   authToken?: string;
+  sshPrivateKey?: string;
   repoSlug: string;
 }
 
@@ -74,22 +75,23 @@ export class GitPlugin implements Plugin {
       fields: [
         { name: 'repoUrl', label: 'Repository URL', type: 'string', required: true },
         {
-          name: 'branch',
-          label: 'Branch',
-          type: 'string',
-          description: 'Defaults to "main" when omitted'
-        },
-        {
           name: 'branches',
-          label: 'Branches (one per line)',
+          label: 'Branches Included',
           type: 'array',
-          description: 'Optional list of branches to crawl. Leave empty to process every branch.'
+          description: 'Optional list of branches to crawl (one per line). Leave blank to process every branch.'
         },
         {
           name: 'authToken',
           label: 'Auth Token',
           type: 'string',
           description: 'Optional token for private HTTPS repositories'
+        },
+        {
+          name: 'sshPrivateKey',
+          label: 'SSH Private Key',
+          type: 'string',
+          description: 'Optional private key for git@ style cloning',
+          multiline: true
         }
       ]
     },
@@ -203,23 +205,26 @@ export class GitPlugin implements Plugin {
     if (!repoUrl) {
       throw new BadRequestException('Git plugin requires repoUrl in source options');
     }
-    const branchInput = raw?.branch?.trim();
     const branchFilter = this.normalizeBranchList(raw?.branches);
-    if (!branchFilter.length && branchInput) {
-      branchFilter.push(branchInput);
-    }
-    const primaryBranch = branchInput || 'main';
+    const primaryBranch = branchFilter[0] ?? 'main';
     const authToken = raw?.authToken?.trim() || undefined;
+    const sshPrivateKey = this.normalizePrivateKey(raw?.sshPrivateKey);
     const repoSlug = this.slugify(repoUrl);
-    return { repoUrl, primaryBranch, branchFilter, authToken, repoSlug };
+    return { repoUrl, primaryBranch, branchFilter, authToken, sshPrivateKey, repoSlug };
   }
 
-  private normalizeBranchList(value?: string[]): string[] {
-    if (!Array.isArray(value)) {
+  private normalizeBranchList(value?: string | string[]): string[] {
+    if (!value) {
       return [];
     }
+    const inputs = Array.isArray(value)
+      ? value
+      : value
+          .split('\n')
+          .map((entry) => entry.trim())
+          .filter(Boolean);
     const seen = new Set<string>();
-    value.forEach((entry) => {
+    inputs.forEach((entry) => {
       const token = entry?.trim();
       if (token) {
         seen.add(token);
@@ -230,15 +235,39 @@ export class GitPlugin implements Plugin {
 
   private async prepareRepository(options: NormalizedGitOptions): Promise<string> {
     const tempDir = await mkdtemp(path.join(tmpdir(), 'harvester-git-'));
-    const cloneUrl = this.buildCloneUrl(options.repoUrl, options.authToken);
+    const cloneUrl = this.buildCloneUrl(
+      options.repoUrl,
+      options.authToken,
+      Boolean(options.sshPrivateKey)
+    );
     const args = ['clone', cloneUrl, tempDir];
     this.logger.log(`GitPlugin cloning ${options.repoUrl}`);
+    let sshContext:
+      | {
+          env: NodeJS.ProcessEnv;
+          cleanup: () => Promise<void>;
+        }
+      | undefined;
+    if (options.sshPrivateKey) {
+      try {
+        sshContext = await this.setupSshKey(options.sshPrivateKey);
+      } catch (error) {
+        await this.cleanupRepository(tempDir);
+        throw error;
+      }
+    }
     try {
-      await this.runGit(args, { cwd: undefined, displayArgs: this.sanitizeArgs(args) });
+      await this.runGit(args, {
+        cwd: undefined,
+        displayArgs: this.sanitizeArgs(args),
+        env: sshContext?.env
+      });
       return tempDir;
     } catch (error) {
       await this.cleanupRepository(tempDir);
       throw error;
+    } finally {
+      await sshContext?.cleanup?.();
     }
   }
 
@@ -642,7 +671,10 @@ export class GitPlugin implements Plugin {
     }
   }
 
-  private buildCloneUrl(repoUrl: string, authToken?: string): string {
+  private buildCloneUrl(repoUrl: string, authToken?: string, useSsh?: boolean): string {
+    if (useSsh) {
+      return repoUrl;
+    }
     let target = repoUrl;
     const sshMatch = repoUrl.match(/^git@([^:]+):(.+)$/);
     if (sshMatch) {
@@ -678,13 +710,19 @@ export class GitPlugin implements Plugin {
 
   private runGit(
     args: string[],
-    options: { cwd?: string; encoding?: BufferEncoding | 'buffer'; displayArgs?: string[] } = {}
+    options: {
+      cwd?: string;
+      encoding?: BufferEncoding | 'buffer';
+      displayArgs?: string[];
+      env?: NodeJS.ProcessEnv;
+    } = {}
   ): Promise<Buffer> {
     return new Promise((resolve, reject) => {
+      const env = options.env ? { ...process.env, ...options.env } : process.env;
       const child = spawn(this.gitCmd, args, {
         cwd: options.cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: process.env
+        env
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
@@ -701,5 +739,46 @@ export class GitPlugin implements Plugin {
         }
       });
     });
+  }
+
+  private normalizePrivateKey(value?: string): string | undefined {
+    if (!value) {
+      return undefined;
+    }
+    const normalized = value.replace(/\r\n/g, '\n').trim();
+    if (!normalized) {
+      return undefined;
+    }
+    return normalized.endsWith('\n') ? normalized : `${normalized}\n`;
+  }
+
+  private async setupSshKey(privateKey: string): Promise<{
+    env: NodeJS.ProcessEnv;
+    cleanup: () => Promise<void>;
+  }> {
+    const tempDir = await mkdtemp(path.join(tmpdir(), 'harvester-git-ssh-'));
+    const keyPath = path.join(tempDir, 'id');
+    try {
+      await writeFile(keyPath, privateKey, { mode: 0o600 });
+      await chmod(keyPath, 0o600);
+    } catch (error) {
+      await rm(tempDir, { recursive: true, force: true });
+      throw error;
+    }
+
+    const env = {
+      GIT_SSH_COMMAND:
+        `ssh -i ${keyPath} ` +
+        '-o IdentitiesOnly=yes ' +
+        '-o StrictHostKeyChecking=no ' +
+        '-o UserKnownHostsFile=/dev/null'
+    };
+
+    return {
+      env,
+      cleanup: async () => {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    };
   }
 }

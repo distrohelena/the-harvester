@@ -7,6 +7,7 @@ export interface PluginSchemaField {
   required?: boolean;
   enumValues?: string[];
   description?: string;
+  multiline?: boolean;
 }
 
 export interface PluginSchema {
