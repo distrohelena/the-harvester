@@ -483,8 +483,13 @@ function formatTimestamp(value?: string) {
 .ghost {
   border: 1px solid #d1d5db;
   background: transparent;
-  border-radius: 0.35rem;
+  border-radius: 0.375rem;
   padding: 0.25rem 0.75rem;
   cursor: pointer;
+}
+
+.ghost:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 </style>

@@ -310,7 +310,12 @@ watch(
 <template>
   <div class="docs-browser">
     <div class="sources-panel">
-      <h3>Documentation Sources</h3>
+      <header>
+        <h3>Documentation Sources</h3>
+        <button type="button" class="ghost" @click="loadSources" :disabled="state.loadingSources">
+          {{ state.loadingSources ? 'Refreshing…' : 'Refresh' }}
+        </button>
+      </header>
       <div v-if="state.loadingSources">Loading sources…</div>
       <div v-else-if="!state.sources.length">No documentation sources found.</div>
       <ul v-else>
@@ -386,6 +391,14 @@ watch(
   background: #fff;
   padding: 1rem;
   overflow: hidden;
+}
+
+.sources-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
 }
 
 .sources-panel ul {
@@ -507,5 +520,18 @@ watch(
 .error {
   color: #b91c1c;
   font-weight: 600;
+}
+
+.ghost {
+  border: 1px solid #d1d5db;
+  background: transparent;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+}
+
+.ghost:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 </style>

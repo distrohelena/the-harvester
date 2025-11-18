@@ -323,6 +323,13 @@ aside ul {
   gap: 0.5rem;
 }
 
+aside header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
 aside li {
   border: 1px solid #e2e8f0;
   border-radius: 0.5rem;
@@ -527,11 +534,10 @@ button.primary {
 }
 
 button.ghost {
-  border: 1px solid #cbd5f5;
-  background: #fff;
-  border-radius: 0.5rem;
-  padding: 0.3rem 0.9rem;
-  color: #1d4ed8;
+  background: transparent;
+  border: 1px solid #d1d5db;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.75rem;
   cursor: pointer;
 }
 
