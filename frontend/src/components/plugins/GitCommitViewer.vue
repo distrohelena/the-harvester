@@ -13,6 +13,10 @@ interface GitCommitChange {
   mode?: string;
   previousMode?: string;
   size?: number;
+  additions?: number;
+  deletions?: number;
+  patch?: string;
+  binary?: boolean;
 }
 
 interface GitCommitData {
@@ -69,7 +73,7 @@ const changeList = computed<GitCommitChange[]>(() =>
 const filesLoading = computed(() => Boolean(props.filesLoading));
 const snapshotLoading = computed(() => Boolean(props.snapshotLoading));
 
-const changedFileEntries = computed<FileArtifactData[]>(() =>
+const fileArtifacts = computed<FileArtifactData[]>(() =>
   (props.files ?? [])
     .map((artifact) => {
       const data = (artifact.lastVersion?.data ?? {}) as any;
@@ -89,6 +93,31 @@ const changedFileEntries = computed<FileArtifactData[]>(() =>
       } as FileArtifactData;
     })
     .filter((entry): entry is FileArtifactData => Boolean(entry?.path))
+);
+
+const fileArtifactMap = computed<Map<string, FileArtifactData>>(() => {
+  const map = new Map<string, FileArtifactData>();
+  fileArtifacts.value.forEach((entry) => {
+    map.set(entry.path, entry);
+  });
+  return map;
+});
+
+type ChangedEntry = {
+  path: string;
+  change: GitCommitChange;
+  file?: FileArtifactData;
+};
+
+const changedEntries = computed<ChangedEntry[]>(() =>
+  changeList.value.map((change, index) => {
+    const entryPath = change.path ?? change.previousPath ?? `unknown-${index}`;
+    return {
+      path: entryPath,
+      change,
+      file: fileArtifactMap.value.get(entryPath)
+    };
+  })
 );
 
 const snapshotEntries = computed<SnapshotTreeEntry[]>(() => props.snapshotFiles ?? []);
@@ -169,14 +198,15 @@ function normalizeRepoUrl(value?: string) {
   if (!value) {
     return '';
   }
-  if (value.startsWith('http://') || value.startsWith('https://')) {
-    return value;
+  const trimmed = value.replace(/\/+$/, '');
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    return trimmed.replace(/\.git$/, '');
   }
   const sshMatch = value.match(/^git@([^:]+):(.+)$/);
   if (sshMatch) {
-    return `https://${sshMatch[1]}/${sshMatch[2]}`;
+    return `https://${sshMatch[1]}/${sshMatch[2].replace(/\.git$/, '')}`;
   }
-  return value;
+  return trimmed;
 }
 
 type TreeNode = {
@@ -184,20 +214,36 @@ type TreeNode = {
   path: string;
   type: 'file' | 'directory';
   children?: TreeNode[];
-  file?: FileArtifactData;
+  file?: FileArtifactData | SnapshotTreeEntry;
+  change?: GitCommitChange;
   fileCount?: number;
 };
 
-const changedTreeNodes = computed<TreeNode[]>(() => buildTree(changedFileEntries.value));
-const changedFileMap = computed<Map<string, FileArtifactData>>(() => {
-  const map = new Map<string, FileArtifactData>();
-  changedFileEntries.value.forEach((entry) => {
-    map.set(entry.path, entry);
-  });
-  return map;
-});
+type TreeInputEntry = {
+  path: string;
+  file?: FileArtifactData | SnapshotTreeEntry;
+  change?: GitCommitChange;
+};
 
-const snapshotTreeNodes = computed<TreeNode[]>(() => buildTree(snapshotEntries.value));
+const changedTreeNodes = computed<TreeNode[]>(() =>
+  buildTree(
+    changedEntries.value.map((entry) => ({
+      path: entry.path,
+      file:
+        entry.file ??
+        ({
+          path: entry.path,
+          mode: entry.change.mode,
+          size: entry.change.size
+        } as FileArtifactData),
+      change: entry.change
+    }))
+  )
+);
+
+const snapshotTreeNodes = computed<TreeNode[]>(() =>
+  buildTree(snapshotEntries.value.map((entry) => ({ path: entry.path, file: entry })))
+);
 const changedDirectoryCount = computed(() => countDirectories(changedTreeNodes.value));
 const snapshotDirectoryCount = computed(() => countDirectories(snapshotTreeNodes.value));
 
@@ -210,7 +256,7 @@ const snapshotLoadingFile = ref(false);
 const snapshotSelectedFile = ref<FileArtifactData>();
 
 watch(
-  () => changedFileEntries.value,
+  () => changedEntries.value,
   (list) => {
     changedExpandedPaths.value = new Set();
     changedSelectedPath.value = list[0]?.path;
@@ -239,9 +285,20 @@ watch(
   { immediate: true }
 );
 
-const changedSelectedFile = computed(() =>
-  changedSelectedPath.value ? changedFileMap.value.get(changedSelectedPath.value) : undefined
+const changedEntryMap = computed<Map<string, ChangedEntry>>(() => {
+  const map = new Map<string, ChangedEntry>();
+  changedEntries.value.forEach((entry) => {
+    map.set(entry.path, entry);
+  });
+  return map;
+});
+
+const changedSelectedEntry = computed(() =>
+  changedSelectedPath.value ? changedEntryMap.value.get(changedSelectedPath.value) : undefined
 );
+
+const changedSelectedFile = computed(() => changedSelectedEntry.value?.file);
+const changedSelectedChange = computed(() => changedSelectedEntry.value?.change);
 
 async function loadSnapshotFileContent(path: string) {
   if (!props.loadSnapshotFile) {
@@ -331,6 +388,11 @@ const downloadChangedFile = () => downloadArtifactFile(changedSelectedFile.value
 const downloadSnapshotFile = () => downloadArtifactFile(snapshotSelectedFile.value);
 
 const changedFilePreview = computed(() => buildPreview(changedSelectedFile.value));
+const MAX_DIFF_LINES = 2000;
+const diffPreview = computed(() => buildDiffLines(changedSelectedChange.value?.patch, MAX_DIFF_LINES));
+const visibleDiffLines = computed(() =>
+  diffPreview.value.lines.filter((line) => line.kind !== 'info' && line.kind !== 'hunk')
+);
 const snapshotFilePreview = computed(() => buildPreview(snapshotSelectedFile.value));
 
 const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico', 'avif'];
@@ -359,17 +421,24 @@ function buildImageDataUrl(file: FileArtifactData) {
   return `data:${mime};base64,${base64}`;
 }
 
-function buildTree(files: FileArtifactData[]): TreeNode[] {
+function normalizeContent(value?: string) {
+  if (!value) {
+    return '';
+  }
+  return value.replace(/\r\n/g, '\n');
+}
+
+function buildTree(files: TreeInputEntry[]): TreeNode[] {
   const root: Record<string, TreeNode> = {};
-  files.forEach((file) => {
-    const segments = file.path.split('/');
+  files.forEach((entry) => {
+    const segments = entry.path.split('/');
     let cursor: TreeNode | undefined;
     segments.forEach((segment, index) => {
       const isFile = index === segments.length - 1;
       if (!cursor) {
         root[segment] = root[segment] ?? {
           name: segment,
-          path: isFile ? file.path : segment,
+          path: isFile ? entry.path : segment,
           type: isFile ? 'file' : 'directory',
           children: []
         };
@@ -380,7 +449,7 @@ function buildTree(files: FileArtifactData[]): TreeNode[] {
         if (!next) {
           next = {
             name: segment,
-            path: isFile ? file.path : `${cursor.path}/${segment}`,
+            path: isFile ? entry.path : `${cursor.path}/${segment}`,
             type: isFile ? 'file' : 'directory',
             children: []
           };
@@ -389,7 +458,14 @@ function buildTree(files: FileArtifactData[]): TreeNode[] {
         cursor = next;
       }
       if (isFile) {
-        cursor!.file = file;
+        cursor!.file =
+          entry.file ??
+          ({
+            path: entry.path,
+            size: entry.change?.size,
+            mode: entry.change?.mode
+          } as FileArtifactData);
+        cursor!.change = entry.change;
         cursor!.type = 'file';
       }
     });
@@ -445,9 +521,7 @@ const TreeBranch = defineComponent({
         emit('toggle', node.path);
         return;
       }
-      if (node.file?.path) {
-        emit('select', node.file.path);
-      }
+      emit('select', node.path);
     };
 
     const renderChildren = (children?: TreeNode[]) => {
@@ -475,7 +549,7 @@ const TreeBranch = defineComponent({
 
     return () => {
       const node = props.node;
-      const isSelected = node.type === 'file' && props.selectedPath === node.file?.path;
+      const isSelected = node.type === 'file' && props.selectedPath === node.path;
       const classes = [
         'tree-node',
         node.type === 'directory' ? 'directory' : 'file',
@@ -524,11 +598,7 @@ const TreeBranch = defineComponent({
       );
       content.push(h('span', { class: 'node-label' }, node.name));
       const metaText =
-        node.type === 'directory'
-          ? formatDirectoryMeta(node)
-          : typeof node.file?.size === 'number'
-          ? formatBytes(node.file.size)
-          : '';
+        node.type === 'directory' ? formatDirectoryMeta(node) : formatFileMeta(node);
       if (metaText) {
         content.push(h('span', { class: 'node-meta' }, metaText));
       }
@@ -557,6 +627,37 @@ function formatDirectoryMeta(node: TreeNode) {
   }
   parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`);
   return parts.join(' · ');
+}
+
+function formatFileMeta(node: TreeNode) {
+  const change = node.change;
+  if (change) {
+    if (change.status === 'D') {
+      return 'Deleted';
+    }
+    const additions = change.additions ?? 0;
+    const deletions = change.deletions ?? 0;
+    if (additions || deletions) {
+      const parts = [];
+      if (additions) {
+        parts.push(`+${additions}`);
+      }
+      if (deletions) {
+        parts.push(`-${deletions}`);
+      }
+      return parts.join(' / ');
+    }
+    const status = statusLabel(change.status);
+    if (status && status !== 'Unknown') {
+      return status;
+    }
+  }
+  const sizeValue =
+    (node.file as FileArtifactData | SnapshotTreeEntry | undefined)?.size ?? change?.size;
+  if (typeof sizeValue === 'number') {
+    return formatBytes(sizeValue);
+  }
+  return '';
 }
 
 function renderFolderIcon() {
@@ -605,6 +706,7 @@ type FilePreview = {
   binary: boolean;
   imageUrl?: string;
   isImage?: boolean;
+  lines?: Array<{ number: number; text: string }>;
 };
 
 function buildPreview(file?: FileArtifactData): FilePreview {
@@ -620,7 +722,104 @@ function buildPreview(file?: FileArtifactData): FilePreview {
   const max = 200_000;
   const truncated = file.content.length > max;
   const text = truncated ? file.content.slice(0, max) : file.content;
-  return { text, truncated, binary: false };
+  const normalized = text.replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n').map((line, index) => ({
+    number: index + 1,
+    text: line
+  }));
+  return { text, truncated, binary: false, lines };
+}
+
+type DiffLineKind = 'add' | 'del' | 'context' | 'hunk' | 'info';
+
+type DiffLine = {
+  content: string;
+  kind: DiffLineKind;
+  oldNumber?: number;
+  newNumber?: number;
+};
+
+function parseDiffHunkHeader(line: string) {
+  const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+  if (!match) {
+    return null;
+  }
+  return {
+    oldStart: Number(match[1]),
+    newStart: Number(match[3])
+  };
+}
+
+function buildDiffLines(patch?: string, maxLines = 2000): { lines: DiffLine[]; truncated: boolean } {
+  if (!patch) {
+    return { lines: [], truncated: false };
+  }
+  const normalized = patch.replace(/\r\n/g, '\n');
+  const rawLines = normalized.split('\n');
+  const lines: DiffLine[] = [];
+  let truncated = false;
+  let oldNumber = 0;
+  let newNumber = 0;
+
+  const pushLine = (line: DiffLine) => {
+    if (lines.length < maxLines) {
+      lines.push(line);
+    } else {
+      truncated = true;
+    }
+  };
+
+  for (const rawLine of rawLines) {
+    if (rawLine.startsWith('@@')) {
+      const parsed = parseDiffHunkHeader(rawLine);
+      if (parsed) {
+        oldNumber = parsed.oldStart;
+        newNumber = parsed.newStart;
+      }
+      pushLine({ content: rawLine, kind: 'hunk' });
+      continue;
+    }
+    if (
+      rawLine.startsWith('diff --git') ||
+      rawLine.startsWith('index ') ||
+      rawLine.startsWith('Binary files ')
+    ) {
+      pushLine({ content: rawLine, kind: 'info' });
+      continue;
+    }
+    if (rawLine.startsWith('--- ') || rawLine.startsWith('+++ ')) {
+      pushLine({ content: rawLine, kind: 'info' });
+      continue;
+    }
+    if (rawLine.startsWith('+') && !rawLine.startsWith('+++')) {
+      pushLine({
+        content: rawLine,
+        kind: 'add',
+        newNumber: newNumber
+      });
+      newNumber += 1;
+      continue;
+    }
+    if (rawLine.startsWith('-') && !rawLine.startsWith('---')) {
+      pushLine({
+        content: rawLine,
+        kind: 'del',
+        oldNumber: oldNumber
+      });
+      oldNumber += 1;
+      continue;
+    }
+    pushLine({
+      content: rawLine,
+      kind: 'context',
+      oldNumber: oldNumber || undefined,
+      newNumber: newNumber || undefined
+    });
+    if (oldNumber) oldNumber += 1;
+    if (newNumber) newNumber += 1;
+  }
+
+  return { lines, truncated };
 }
 
 function expandAncestors(path: string, existing: Set<string>): Set<string> {
@@ -683,13 +882,9 @@ function collapseAllSnapshotDirectories() {
         <p class="label">Commit</p>
         <p class="value mono">
           <span>{{ commitHash }}</span>
-          <a
-            v-if="repoLink"
-            :href="`${repoLink.replace(/\\.git$/, '')}/commit/${commitHash}`"
-            target="_blank"
-            rel="noopener"
-            >View on origin</a
-          >
+          <template v-if="repoLink">
+            <a :href="`${repoLink}/commit/${commitHash}`" target="_blank" rel="noopener">View on origin</a>
+          </template>
         </p>
       </div>
       <div>
@@ -770,14 +965,14 @@ function collapseAllSnapshotDirectories() {
     </section>
 
     <section class="repository">
-      <h4>Changed Files Browser ({{ changedFileEntries.length }})</h4>
+      <h4>Changed Files Browser ({{ changedEntries.length }})</h4>
       <p v-if="filesLoading" class="placeholder">Loading changed files…</p>
-      <div class="repo-browser" v-else-if="changedFileEntries.length">
+      <div class="repo-browser" v-else-if="changedEntries.length">
         <div class="tree-panel">
           <div class="tree-toolbar">
             <div>
               <p class="label subtle">Changed files tree</p>
-              <p class="meta">{{ changedDirectoryCount }} folders · {{ changedFileEntries.length }} files</p>
+              <p class="meta">{{ changedDirectoryCount }} folders · {{ changedEntries.length }} files</p>
             </div>
             <div class="tree-actions">
               <button type="button" class="ghost-button" @click="expandAllChangedDirectories">Expand all</button>
@@ -799,13 +994,21 @@ function collapseAllSnapshotDirectories() {
           </div>
         </div>
         <div class="preview">
-          <template v-if="changedSelectedFile">
+          <template v-if="changedSelectedEntry">
             <header>
               <div>
-                <h5>{{ changedSelectedFile.path }}</h5>
+                <h5>{{ changedSelectedEntry.path }}</h5>
                 <p>
-                  {{ formatBytes(changedSelectedFile.size) }}
-                  <span v-if="changedSelectedFile.mode">· {{ changedSelectedFile.mode }}</span>
+                  <span>
+                    {{
+                      typeof (changedSelectedEntry.file?.size ?? changedSelectedChange?.size) === 'number'
+                        ? formatBytes(changedSelectedEntry.file?.size ?? changedSelectedChange?.size)
+                        : 'Size unknown'
+                    }}
+                  </span>
+                  <span v-if="changedSelectedEntry.file?.mode || changedSelectedChange?.mode">
+                    · {{ changedSelectedEntry.file?.mode ?? changedSelectedChange?.mode }}
+                  </span>
                 </p>
               </div>
               <button
@@ -817,21 +1020,70 @@ function collapseAllSnapshotDirectories() {
                 Download
               </button>
             </header>
-            <template v-if="changedFilePreview.imageUrl">
-              <div class="image-preview">
-                <img :src="changedFilePreview.imageUrl" :alt="changedSelectedFile.path" />
+            <div class="diff-meta">
+              <span
+                v-if="changedSelectedChange?.status"
+                :class="['status-chip', statusClass(changedSelectedChange?.status)]"
+                >{{ statusLabel(changedSelectedChange?.status) }}</span
+              >
+              <div
+                class="diff-counts"
+                v-if="
+                  typeof changedSelectedChange?.additions === 'number' ||
+                  typeof changedSelectedChange?.deletions === 'number'
+                "
+              >
+                <span v-if="typeof changedSelectedChange?.additions === 'number'" class="diff-count add">
+                  +{{ changedSelectedChange?.additions ?? 0 }}
+                </span>
+                <span v-if="typeof changedSelectedChange?.deletions === 'number'" class="diff-count del">
+                  -{{ changedSelectedChange?.deletions ?? 0 }}
+                </span>
               </div>
-            </template>
-            <div v-else-if="changedSelectedFile.content && !changedFilePreview.binary">
-              <pre>{{ changedFilePreview.text }}</pre>
-              <p v-if="changedFilePreview.truncated" class="hint">
-                Preview truncated for large files. Download to view full content.
+            </div>
+            <div v-if="visibleDiffLines.length" class="diff-view">
+              <div
+                v-for="(line, index) in visibleDiffLines"
+                :key="`diff-line-${index}`"
+                :class="['diff-line', `diff-${line.kind}`]"
+              >
+                <span class="diff-line-number old">{{ line.oldNumber ?? '' }}</span>
+                <span class="diff-line-number new">{{ line.newNumber ?? '' }}</span>
+                <span class="diff-line-content">{{ line.content || ' ' }}</span>
+              </div>
+              <p v-if="diffPreview.truncated" class="hint">
+                Diff truncated for display. Download the file for the full patch.
               </p>
             </div>
-            <p v-else class="placeholder">Binary file preview not available. Download to view.</p>
+            <p v-else-if="changedSelectedChange?.binary" class="placeholder">
+              Binary file diff not available. Download to inspect contents.
+            </p>
+            <template v-else>
+              <template v-if="changedFilePreview.imageUrl">
+                <div class="image-preview">
+                  <img :src="changedFilePreview.imageUrl" :alt="changedSelectedEntry.path" />
+                </div>
+              </template>
+              <div v-else-if="changedSelectedFile?.content && !changedFilePreview.binary">
+                <div class="code-view" v-if="changedFilePreview.lines?.length">
+                  <div
+                    v-for="line in changedFilePreview.lines"
+                    :key="`changed-code-${line.number}`"
+                    class="code-line"
+                  >
+                    <span class="code-line-number">{{ line.number }}</span>
+                    <span class="code-line-content">{{ line.text || ' ' }}</span>
+                  </div>
+                </div>
+                <p v-if="changedFilePreview.truncated" class="hint">
+                  Preview truncated for large files. Download to view full content.
+                </p>
+              </div>
+              <p v-else class="placeholder">No patch data captured for this file.</p>
+            </template>
           </template>
           <div v-else class="preview-empty">
-            <p class="placeholder">Select a file from the tree to view its contents.</p>
+            <p class="placeholder">Select a file from the tree to view its diff.</p>
           </div>
         </div>
       </div>
@@ -894,7 +1146,16 @@ function collapseAllSnapshotDirectories() {
                 </div>
               </template>
               <div v-else-if="snapshotSelectedFile.content && !snapshotFilePreview.binary">
-                <pre>{{ snapshotFilePreview.text }}</pre>
+                <div class="code-view" v-if="snapshotFilePreview.lines?.length">
+                  <div
+                    v-for="line in snapshotFilePreview.lines"
+                    :key="`snapshot-code-${line.number}`"
+                    class="code-line"
+                  >
+                    <span class="code-line-number">{{ line.number }}</span>
+                    <span class="code-line-content">{{ line.text || ' ' }}</span>
+                  </div>
+                </div>
                 <p v-if="snapshotFilePreview.truncated" class="hint">
                   Preview truncated for large files. Download to view full content.
                 </p>
@@ -1275,16 +1536,104 @@ a {
   gap: 1rem;
 }
 
-.preview pre {
-  background: rgba(15, 23, 42, 0.85);
+.code-view {
+  border: 1px solid rgba(148, 163, 184, 0.4);
   border-radius: 0.5rem;
-  padding: 0.75rem;
-  overflow: auto;
-  white-space: pre-wrap;
   max-height: 360px;
-  max-width: 100%;
-  width: 100%;
-  word-break: break-word;
+  overflow: auto;
+  font-family: 'Fira Code', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  background: rgba(15, 23, 42, 0.7);
+}
+
+.code-line {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr);
+  gap: 0.5rem;
+  padding: 0.2rem 0.75rem;
+}
+
+.code-line-number {
+  text-align: right;
+  color: #94a3b8;
+}
+
+.code-line-content {
+  white-space: pre-wrap;
+}
+
+.diff-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.diff-counts {
+  display: inline-flex;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.diff-count {
+  font-weight: 600;
+}
+
+.diff-count.add {
+  color: #4ade80;
+}
+
+.diff-count.del {
+  color: #f87171;
+}
+
+.diff-view {
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 0.5rem;
+  background: rgba(15, 23, 42, 0.6);
+  max-height: 360px;
+  overflow: auto;
+  font-family: 'Fira Code', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 3rem 3rem minmax(0, 1fr);
+  white-space: pre-wrap;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.85rem;
+}
+
+.diff-line-number {
+  text-align: right;
+  padding-right: 0.5rem;
+  color: #94a3b8;
+}
+
+.diff-line-content {
+  white-space: pre-wrap;
+}
+
+.diff-line.diff-add {
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.15);
+}
+
+.diff-line.diff-del {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.15);
+}
+
+.diff-line.diff-hunk {
+  color: #facc15;
+}
+
+.diff-line.diff-header,
+.diff-line.diff-info {
+  color: #93c5fd;
+}
+
+.diff-line.diff-context {
+  color: #e2e8f0;
 }
 
 .image-preview {

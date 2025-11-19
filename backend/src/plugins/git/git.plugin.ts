@@ -56,6 +56,10 @@ interface CommitFileChange {
   mode?: string;
   previousMode?: string;
   size?: number;
+  additions?: number;
+  deletions?: number;
+  patch?: string;
+  binary?: boolean;
 }
 
 interface SnapshotEntry {
@@ -83,6 +87,14 @@ interface DiffTreeEntry {
   status: string;
   path: string;
   newPath?: string;
+}
+
+interface FilePatchSummary {
+  path: string;
+  additions: number;
+  deletions: number;
+  patch: string;
+  binary: boolean;
 }
 
 @Injectable()
@@ -647,6 +659,7 @@ export class GitPlugin implements Plugin {
       return [];
     }
 
+    const patchSummaries = await this.readCommitPatches(repoPath, commitHash);
     const files: CommitFileChange[] = [];
     for (const entry of entries) {
       const status = entry.status as ChangeStatus;
@@ -661,6 +674,13 @@ export class GitPlugin implements Plugin {
         mode: isDeletion ? entry.oldMode : entry.newMode,
         previousMode: entry.oldMode
       };
+      const patchInfo = patchSummaries.get(change.path);
+      if (patchInfo) {
+        change.additions = patchInfo.additions;
+        change.deletions = patchInfo.deletions;
+        change.patch = patchInfo.patch;
+        change.binary = patchInfo.binary;
+      }
 
       files.push(change);
     }
@@ -739,6 +759,131 @@ export class GitPlugin implements Plugin {
     }
 
     return entries;
+  }
+
+  private async readCommitPatches(
+    repoPath: string,
+    commitHash: string
+  ): Promise<Map<string, FilePatchSummary>> {
+    try {
+      const patchOutput = await this.runGit(
+        [
+          'show',
+          '--patch',
+          '--unified=2000',
+          '--format=',
+          '--find-renames',
+          '--find-copies',
+          '--no-color',
+          '--no-ext-diff',
+          commitHash
+        ],
+        { cwd: repoPath }
+      );
+      return this.parsePatchSummaries(patchOutput.toString('utf8'));
+    } catch (error) {
+      this.logger.warn(
+        `GitPlugin could not read patch data for commit ${commitHash}: ${
+          error instanceof Error ? error.message : error
+        }`
+      );
+      return new Map();
+    }
+  }
+
+  private parsePatchSummaries(text: string): Map<string, FilePatchSummary> {
+    const summaries = new Map<string, FilePatchSummary>();
+    const lines = text.split('\n');
+    let currentPath: string | undefined;
+    let buffer: string[] = [];
+    let additions = 0;
+    let deletions = 0;
+    let binary = false;
+
+    const flush = () => {
+      if (!currentPath || buffer.length === 0) {
+        buffer = [];
+        additions = 0;
+        deletions = 0;
+        binary = false;
+        currentPath = undefined;
+        return;
+      }
+      summaries.set(currentPath, {
+        path: currentPath,
+        additions,
+        deletions,
+        patch: buffer.join('\n'),
+        binary
+      });
+      buffer = [];
+      additions = 0;
+      deletions = 0;
+      binary = false;
+      currentPath = undefined;
+    };
+
+    for (const rawLine of lines) {
+      if (rawLine.startsWith('diff --git ')) {
+        flush();
+        currentPath = this.extractPathFromDiffHeader(rawLine);
+        buffer = [rawLine];
+        continue;
+      }
+      if (!currentPath) {
+        continue;
+      }
+      buffer.push(rawLine);
+      if (rawLine.startsWith('Binary files ')) {
+        binary = true;
+        continue;
+      }
+      if (rawLine.startsWith('+++ ')) {
+        const pathCandidate = this.normalizeDiffPath(rawLine.slice(4).trim());
+        if (pathCandidate) {
+          currentPath = pathCandidate;
+        }
+        continue;
+      }
+      if (rawLine.startsWith('--- ')) {
+        continue;
+      }
+      if (rawLine.startsWith('+') && !rawLine.startsWith('+++')) {
+        additions += 1;
+      } else if (rawLine.startsWith('-') && !rawLine.startsWith('---')) {
+        deletions += 1;
+      }
+    }
+    flush();
+    return summaries;
+  }
+
+  private extractPathFromDiffHeader(line: string): string | undefined {
+    const match = line.match(/^diff --git (.+) (.+)$/);
+    if (!match) {
+      return undefined;
+    }
+    const [, left, right] = match;
+    return this.normalizeDiffPath(right) ?? this.normalizeDiffPath(left);
+  }
+
+  private normalizeDiffPath(raw?: string): string | undefined {
+    if (!raw) {
+      return undefined;
+    }
+    let value = raw.trim();
+    if (value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1);
+    }
+    if (value === '/dev/null') {
+      return undefined;
+    }
+    if (value.startsWith('a/')) {
+      value = value.slice(2);
+    } else if (value.startsWith('b/')) {
+      value = value.slice(2);
+    }
+    return value;
   }
 
   private isZeroSha(sha?: string): boolean {

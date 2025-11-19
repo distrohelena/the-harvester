@@ -2,6 +2,8 @@ import http from './http';
 import type { PaginatedResponse } from './sources';
 import type { ArtifactModel } from '../types/plugins';
 
+export type GitCommitSort = 'newest' | 'oldest' | 'author' | 'message';
+
 export interface GitSnapshotEntry {
   path: string;
   mode?: string;
@@ -16,10 +18,30 @@ export interface GitSnapshotFileResponse extends GitSnapshotEntry {
   content: string;
 }
 
-export async function fetchGitCommits(sourceId: string, page = 1, limit = 25) {
+export interface FetchGitCommitsOptions {
+  search?: string;
+  sort?: GitCommitSort;
+}
+
+export async function fetchGitCommits(
+  sourceId: string,
+  page = 1,
+  limit = 25,
+  options: FetchGitCommitsOptions = {}
+) {
+  const { search, sort } = options;
+  const trimmedSearch = search?.trim();
+  const params: Record<string, string | number | undefined> = {
+    page,
+    limit,
+    sort
+  };
+  if (trimmedSearch) {
+    params.search = trimmedSearch;
+  }
   const { data } = await http.get<PaginatedResponse<ArtifactModel>>(
     `/plugins/git/sources/${sourceId}/commits`,
-    { params: { page, limit } }
+    { params }
   );
   return data;
 }

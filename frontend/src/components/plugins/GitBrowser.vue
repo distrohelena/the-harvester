@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import GitCommitViewer from './GitCommitViewer.vue';
 import type { ArtifactModel, ArtifactVersionModel, SourceModel } from '../../types/plugins';
 import { fetchSources } from '../../api/sources';
@@ -9,7 +9,8 @@ import {
   fetchGitCommitSnapshot,
   fetchGitCommitSnapshotFile,
   type GitSnapshotEntry,
-  type GitSnapshotFileResponse
+  type GitSnapshotFileResponse,
+  type GitCommitSort
 } from '../../api/git';
 
 type FileArtifactPayload = {
@@ -22,6 +23,10 @@ type FileArtifactPayload = {
   encoding: 'utf8' | 'base64';
   content: string;
 };
+const COMMIT_RELOAD_DELAY = 300;
+let commitReloadHandle: ReturnType<typeof setTimeout> | undefined;
+let activeCommitRequests = 0;
+let latestCommitRequestId = 0;
 
 const sources = ref<SourceModel[]>([]);
 const artifacts = ref<ArtifactModel[]>([]);
@@ -36,8 +41,22 @@ const loadingSnapshot = ref(false);
 const pagination = ref({ page: 1, limit: 25, total: 0 });
 const viewMode = ref<'files' | 'commits'>('files');
 const showCommits = computed(() => viewMode.value === 'commits');
-const branchFilter = ref<string | null>(null);
-const branchMenuOpen = ref(false);
+const branchFilter = ref<string | undefined>(undefined);
+const showBranchPanel = ref(false);
+const branchSearch = ref('');
+const branchSort = ref<'asc' | 'desc'>('asc');
+const branchSortOptions: Array<{ value: 'asc' | 'desc'; label: string }> = [
+  { value: 'asc', label: 'A → Z' },
+  { value: 'desc', label: 'Z → A' }
+];
+const commitSearch = ref('');
+const sortBy = ref<GitCommitSort>('newest');
+const sortOptions: Array<{ value: GitCommitSort; label: string }> = [
+  { value: 'newest', label: 'Newest' },
+  { value: 'oldest', label: 'Oldest' },
+  { value: 'author', label: 'Author (A-Z)' },
+  { value: 'message', label: 'Message (A-Z)' }
+];
 
 const selectedSource = computed(() => sources.value.find((source) => source.id === selectedSourceId.value));
 const allCommits = computed(() => artifacts.value.filter(isCommitArtifact));
@@ -52,6 +71,17 @@ const availableBranches = computed(() => {
     }
   }
   return Array.from(uniqueBranches).sort((a, b) => a.localeCompare(b));
+});
+const visibleBranches = computed(() => {
+  const query = branchSearch.value.trim().toLowerCase();
+  const sortable = [...availableBranches.value];
+  const filtered = query
+    ? sortable.filter((branch) => branch.toLowerCase().includes(query))
+    : sortable;
+  if (branchSort.value === 'desc') {
+    return filtered.sort((a, b) => b.localeCompare(a));
+  }
+  return filtered.sort((a, b) => a.localeCompare(b));
 });
 const filteredCommits = computed(() => {
   if (!branchFilter.value) {
@@ -82,12 +112,14 @@ onMounted(async () => {
 
 watch(availableBranches, (branches) => {
   if (!branches.length) {
-    branchFilter.value = null;
+    branchFilter.value = undefined;
+    showBranchPanel.value = false;
     return;
   }
-  if (!branchFilter.value || !branches.includes(branchFilter.value)) {
-    branchFilter.value = branches[0];
+  if (branchFilter.value && branches.includes(branchFilter.value)) {
+    return;
   }
+  branchFilter.value = branches[0];
 });
 
 watch(filteredCommits, async (next) => {
@@ -105,16 +137,37 @@ watch(filteredCommits, async (next) => {
 });
 
 watch(selectedSourceId, async (next) => {
+  if (commitReloadHandle) {
+    clearTimeout(commitReloadHandle);
+    commitReloadHandle = undefined;
+  }
   if (next) {
     viewMode.value = 'files';
-    branchFilter.value = null;
-    branchMenuOpen.value = false;
+    branchFilter.value = undefined;
+    showBranchPanel.value = false;
+    branchSearch.value = '';
+    branchSort.value = 'asc';
     await loadCommits(next);
   } else {
     artifacts.value = [];
     fileArtifacts.value = [];
     snapshotFiles.value = [];
     selectedArtifactId.value = undefined;
+  }
+});
+
+watch(commitSearch, () => {
+  scheduleCommitReload();
+});
+
+watch(sortBy, () => {
+  scheduleCommitReload(true);
+});
+
+onBeforeUnmount(() => {
+  if (commitReloadHandle) {
+    clearTimeout(commitReloadHandle);
+    commitReloadHandle = undefined;
   }
 });
 
@@ -132,10 +185,18 @@ async function loadSources() {
 }
 
 async function loadCommits(sourceId: string, append = false) {
+  const requestId = ++latestCommitRequestId;
+  activeCommitRequests += 1;
   loadingArtifacts.value = true;
   try {
     const nextPage = append ? pagination.value.page + 1 : 1;
-    const response = await fetchGitCommits(sourceId, nextPage, pagination.value.limit);
+    const response = await fetchGitCommits(sourceId, nextPage, pagination.value.limit, {
+      search: commitSearch.value,
+      sort: sortBy.value
+    });
+    if (requestId !== latestCommitRequestId) {
+      return;
+    }
     pagination.value = {
       page: response.page,
       limit: response.limit,
@@ -147,10 +208,18 @@ async function loadCommits(sourceId: string, append = false) {
     if (!append) {
       const nextCommit = filteredCommits.value[0];
       selectedArtifactId.value = nextCommit?.id;
-      await Promise.all([loadFilesForCommit(nextCommit), loadSnapshotForCommit(nextCommit)]);
+      if (nextCommit) {
+        await Promise.all([loadFilesForCommit(nextCommit), loadSnapshotForCommit(nextCommit)]);
+      } else {
+        fileArtifacts.value = [];
+        snapshotFiles.value = [];
+      }
     }
   } finally {
-    loadingArtifacts.value = false;
+    activeCommitRequests = Math.max(activeCommitRequests - 1, 0);
+    if (activeCommitRequests === 0) {
+      loadingArtifacts.value = false;
+    }
   }
 }
 
@@ -159,8 +228,7 @@ async function loadFilesForCommit(artifact?: ArtifactModel) {
     fileArtifacts.value = [];
     return;
   }
-  const commitHash =
-    (artifact.lastVersion.data as any)?.commitHash ?? artifact.lastVersion.version ?? artifact.displayName;
+  const commitHash = commitHashValue(artifact);
   if (!commitHash) {
     fileArtifacts.value = [];
     return;
@@ -180,8 +248,7 @@ async function loadSnapshotForCommit(artifact?: ArtifactModel) {
     snapshotCommitHash.value = undefined;
     return;
   }
-  const commitHash =
-    (artifact.lastVersion.data as any)?.commitHash ?? artifact.lastVersion.version ?? artifact.displayName;
+  const commitHash = commitHashValue(artifact);
   if (!commitHash) {
     snapshotFiles.value = [];
     snapshotCommitHash.value = undefined;
@@ -201,6 +268,26 @@ function refreshArtifacts() {
   if (selectedSourceId.value) {
     loadCommits(selectedSourceId.value);
   }
+}
+
+function scheduleCommitReload(immediate = false) {
+  if (!selectedSourceId.value) {
+    return;
+  }
+  if (commitReloadHandle) {
+    clearTimeout(commitReloadHandle);
+    commitReloadHandle = undefined;
+  }
+  if (immediate) {
+    loadCommits(selectedSourceId.value);
+    return;
+  }
+  commitReloadHandle = setTimeout(() => {
+    if (selectedSourceId.value) {
+      loadCommits(selectedSourceId.value);
+    }
+    commitReloadHandle = undefined;
+  }, COMMIT_RELOAD_DELAY);
 }
 
 function loadMore() {
@@ -241,13 +328,13 @@ function toggleCommits() {
   viewMode.value = viewMode.value === 'commits' ? 'files' : 'commits';
 }
 
-function toggleBranchMenu() {
-  branchMenuOpen.value = !branchMenuOpen.value;
+function toggleBranchPanel() {
+  showBranchPanel.value = !showBranchPanel.value;
 }
 
 function selectBranchFilter(branch: string) {
   branchFilter.value = branch;
-  branchMenuOpen.value = false;
+  showBranchPanel.value = false;
 }
 
 function formatDate(value?: string) {
@@ -292,9 +379,15 @@ function commitTimestamp(artifact?: ArtifactModel) {
   );
 }
 
-function shortHash(artifact?: ArtifactModel) {
+function commitHashValue(artifact?: ArtifactModel): string | undefined {
   const version = artifact?.lastVersion;
-  const hash: string | undefined = (version?.data as any)?.commitHash ?? version?.version;
+  const hash: string | undefined =
+    (version?.data as any)?.commitHash ?? version?.version ?? artifact?.displayName ?? undefined;
+  return hash;
+}
+
+function shortHash(artifact?: ArtifactModel) {
+  const hash = commitHashValue(artifact);
   return hash ? hash.slice(0, 7) : '—';
 }
 
@@ -317,6 +410,7 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
   }
   return branches;
 }
+
 </script>
 
 <template>
@@ -366,33 +460,67 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
 
       <div v-if="selectedSource" class="workspace-wrapper">
         <div class="view-tabs">
+          <button type="button" :class="{ active: showBranchPanel || !!branchFilter }" @click="toggleBranchPanel">
+            {{ showBranchPanel ? 'Hide Branches' : branchButtonLabel }}
+          </button>
           <button type="button" :class="{ active: showCommits }" @click="toggleCommits">
             {{ showCommits ? 'Hide Commits' : 'View Commits' }}
           </button>
-          <div class="branch-filter">
-            <button
-              type="button"
-              :class="{ active: branchMenuOpen || !!branchFilter }"
-              @click="toggleBranchMenu"
-            >
-              {{ branchButtonLabel }}
-            </button>
-            <div v-if="branchMenuOpen" class="branch-menu">
-              <button
-                type="button"
-                v-for="branch in availableBranches"
-                :key="branch"
-                :class="{ active: branchFilter === branch }"
-                @click="selectBranchFilter(branch)"
-              >
-                {{ branch }}
-              </button>
-            </div>
-          </div>
         </div>
 
-        <div class="workspace" :class="{ 'commits-visible': showCommits }">
+        <div class="workspace" :class="{ 'commits-visible': showCommits, 'branches-visible': showBranchPanel }">
+          <div class="branch-panel" :class="{ visible: showBranchPanel }">
+            <div class="branch-toolbar">
+              <input
+                type="search"
+                v-model="branchSearch"
+                placeholder="Search branches"
+                aria-label="Search branches"
+              />
+              <label class="sort-control">
+                <span>Sort by</span>
+                <select v-model="branchSort">
+                  <option v-for="option in branchSortOptions" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+            </div>
+            <div class="branch-list">
+              <div v-if="!availableBranches.length" class="placeholder">No branches available.</div>
+              <template v-else>
+                <ul>
+                  <li
+                    v-for="branch in visibleBranches"
+                    :key="branch"
+                    :class="{ active: branchFilter === branch }"
+                    @click="selectBranchFilter(branch)"
+                  >
+                    <span>{{ branch }}</span>
+                  </li>
+                </ul>
+                <p v-if="!visibleBranches.length" class="placeholder">No branches match your search.</p>
+              </template>
+            </div>
+          </div>
+
           <div class="commit-panel" :class="{ visible: showCommits }">
+            <div class="commit-toolbar">
+              <input
+                type="search"
+                v-model="commitSearch"
+                placeholder="Search commits"
+                aria-label="Search commits"
+              />
+              <label class="sort-control">
+                <span>Sort by</span>
+                <select v-model="sortBy">
+                  <option v-for="option in sortOptions" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+            </div>
             <div class="commit-list">
               <div v-if="loadingArtifacts && !filteredCommits.length" class="placeholder">Loading commits…</div>
               <div v-else-if="!filteredCommits.length" class="placeholder">
@@ -559,10 +687,9 @@ aside small {
   min-height: 0;
 }
 
+.branch-panel,
 .commit-panel {
-  flex: 0 0 320px;
-  max-width: 320px;
-  width: 320px;
+  flex: 0 0 auto;
   opacity: 0;
   display: flex;
   flex-direction: column;
@@ -570,16 +697,51 @@ aside small {
   overflow: hidden;
   min-height: 0;
   pointer-events: none;
-  margin-right: -320px;
   transform: translateX(-100%);
   transition: transform 0.3s ease, opacity 0.2s ease, margin-right 0.3s ease;
 }
 
+.branch-panel {
+  width: 260px;
+  max-width: 260px;
+  margin-right: -260px;
+  padding: 0 0.5rem 0 0;
+}
+
+.commit-panel {
+  width: 320px;
+  max-width: 320px;
+  margin-right: -320px;
+  padding: 0 0.5rem;
+}
+
+.branch-panel.visible,
 .commit-panel.visible {
   opacity: 1;
   pointer-events: auto;
   margin-right: 0;
   transform: translateX(0);
+  overflow: visible;
+}
+
+.workspace.branches-visible .commit-panel {
+  margin-left: 1rem;
+}
+
+.sort-control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.sort-control select {
+  border: 1px solid #cbd5f5;
+  border-radius: 0.5rem;
+  padding: 0.35rem 1.5rem 0.35rem 0.5rem;
+  background: #fff;
+  font-size: 0.9rem;
 }
 
 .file-panel {
@@ -595,9 +757,20 @@ aside small {
   margin-left: 1rem;
 }
 
+.workspace.branches-visible:not(.commits-visible) .file-panel {
+  margin-left: 1rem;
+}
+
+.branch-toolbar,
 .view-tabs {
   display: inline-flex;
   gap: 0.5rem;
+}
+
+.branch-toolbar {
+  align-items: flex-end;
+  width: 100%;
+  margin-bottom: 0.5rem;
 }
 
 .view-tabs button {
@@ -614,40 +787,25 @@ aside small {
   border-color: #1d4ed8;
 }
 
-.branch-filter {
-  position: relative;
-}
-
-.branch-menu {
-  position: absolute;
-  top: calc(100% + 0.25rem);
-  right: 0;
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 0.5rem;
-  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.15);
-  padding: 0.5rem;
-  min-width: 200px;
-  z-index: 5;
+.branch-toolbar,
+.commit-toolbar {
   display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  align-items: flex-end;
 }
 
-.branch-menu button {
-  border: 1px solid transparent;
-  border-radius: 0.35rem;
-  padding: 0.25rem 0.5rem;
-  text-align: left;
-  background: transparent;
-  cursor: pointer;
+.branch-toolbar input[type='search'],
+.commit-toolbar input[type='search'] {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid #cbd5f5;
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.9rem;
 }
 
-.branch-menu button.active {
-  background: #eef2ff;
-  border-color: #c7d2fe;
-}
-
+.branch-list,
 .commit-list {
   border: 1px solid #e2e8f0;
   border-radius: 0.75rem;
@@ -661,6 +819,7 @@ aside small {
   overflow: auto;
 }
 
+.branch-list ul,
 .commit-list ul {
   list-style: none;
   margin: 0;
@@ -670,6 +829,7 @@ aside small {
   gap: 0.5rem;
 }
 
+.branch-list li,
 .commit-list li {
   border: 1px solid transparent;
   border-radius: 0.5rem;
@@ -681,9 +841,15 @@ aside small {
   cursor: pointer;
 }
 
+.branch-list li.active,
 .commit-list li.active {
   border-color: #2563eb;
   box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.15);
+}
+
+.branch-list span {
+  font-weight: 600;
+  color: #0f172a;
 }
 
 .details .message {

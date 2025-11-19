@@ -1,6 +1,7 @@
 import { BadRequestException, Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import type { SelectQueryBuilder } from 'typeorm';
 import { ArtifactEntity } from '../../artifacts/artifact.entity.js';
 
 interface SnapshotFileEntry {
@@ -10,6 +11,49 @@ interface SnapshotFileEntry {
   blobSha?: string;
   externalId: string;
   sourceCommitHash?: string;
+}
+
+type GitCommitSortOption = 'newest' | 'oldest' | 'author' | 'message';
+const GIT_COMMIT_SORT_OPTIONS: GitCommitSortOption[] = ['newest', 'oldest', 'author', 'message'];
+
+function normalizeCommitSort(sort?: string): GitCommitSortOption {
+  if (sort && GIT_COMMIT_SORT_OPTIONS.includes(sort as GitCommitSortOption)) {
+    return sort as GitCommitSortOption;
+  }
+  return 'newest';
+}
+
+function applyCommitSorting(
+  qb: SelectQueryBuilder<ArtifactEntity>,
+  sort: GitCommitSortOption
+): SelectQueryBuilder<ArtifactEntity> {
+  switch (sort) {
+    case 'oldest':
+      return qb
+        .orderBy('lastVersion.timestamp', 'ASC', 'NULLS LAST')
+        .addOrderBy('artifact.updatedAt', 'ASC');
+    case 'author':
+      return qb
+        .orderBy(
+          "COALESCE(lastVersion.data ->> 'author', lastVersion.metadata ->> 'author', artifact.displayName)",
+          'ASC',
+          'NULLS LAST'
+        )
+        .addOrderBy('lastVersion.timestamp', 'DESC', 'NULLS LAST');
+    case 'message':
+      return qb
+        .orderBy(
+          "COALESCE(lastVersion.data ->> 'message', artifact.displayName, lastVersion.version)",
+          'ASC',
+          'NULLS LAST'
+        )
+        .addOrderBy('lastVersion.timestamp', 'DESC', 'NULLS LAST');
+    case 'newest':
+    default:
+      return qb
+        .orderBy('lastVersion.timestamp', 'DESC', 'NULLS LAST')
+        .addOrderBy('artifact.updatedAt', 'DESC');
+  }
 }
 
 @Controller('plugins/git')
@@ -23,7 +67,9 @@ export class GitPluginController {
   async listCommits(
     @Param('sourceId') sourceId: string,
     @Query('page') page = '1',
-    @Query('limit') limit = '25'
+    @Query('limit') limit = '25',
+    @Query('search') search?: string,
+    @Query('sort') sort?: string
   ) {
     const parsedPage = Number(page);
     const parsedLimit = Number(limit);
@@ -31,6 +77,8 @@ export class GitPluginController {
     const safeLimit = Number.isFinite(parsedLimit)
       ? Math.min(Math.max(parsedLimit, 1), 200)
       : 25;
+    const normalizedSort = normalizeCommitSort(sort);
+    const trimmedSearch = search?.trim();
 
     const qb = this.artifactsRepository
       .createQueryBuilder('artifact')
@@ -40,9 +88,25 @@ export class GitPluginController {
       .andWhere('artifact.pluginKey = :pluginKey', { pluginKey: 'git' })
       .andWhere(
         "(lastVersion.metadata ->> 'artifactType' = 'commit' OR lastVersion.metadata ->> 'artifactType' IS NULL)"
-      )
-      .orderBy('lastVersion.timestamp', 'DESC', 'NULLS LAST')
-      .addOrderBy('artifact.updatedAt', 'DESC')
+      );
+
+    if (trimmedSearch) {
+      const searchParam = `%${trimmedSearch}%`;
+      qb.andWhere(
+        `(
+          artifact.displayName ILIKE :search
+          OR artifact.externalId ILIKE :search
+          OR lastVersion.version ILIKE :search
+          OR (lastVersion.data ->> 'message') ILIKE :search
+          OR (lastVersion.data ->> 'author') ILIKE :search
+          OR (lastVersion.metadata ->> 'author') ILIKE :search
+          OR (lastVersion.data ->> 'commitHash') ILIKE :search
+        )`,
+        { search: searchParam }
+      );
+    }
+
+    applyCommitSorting(qb, normalizedSort)
       .skip((safePage - 1) * safeLimit)
       .take(safeLimit);
 
