@@ -1,5 +1,5 @@
 import type { PluginContext, McpServerPlugin } from './types.js';
-import { gitPlugin } from '../git-tools.js';
+import { gitPlugin } from './git/index.js';
 
 const plugins: McpServerPlugin[] = [gitPlugin];
 

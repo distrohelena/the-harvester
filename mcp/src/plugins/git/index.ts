@@ -13,8 +13,8 @@ import type {
   GitCommitSearchResult,
   GitCommitSummary,
   GitFileArtifactSummary
-} from './artifact-repository.js';
-import type { McpServerPlugin, PluginContext } from './plugins/types.js';
+} from '../../artifact-repository.js';
+import type { McpServerPlugin, PluginContext } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_DIFF_FILE_LIMIT = 5;
