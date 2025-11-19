@@ -1,7 +1,8 @@
 import type { PluginContext, McpServerPlugin } from './types.js';
 import { gitPlugin } from './git/index.js';
+import { docsPlugin } from './docs/index.js';
 
-const plugins: McpServerPlugin[] = [gitPlugin];
+const plugins: McpServerPlugin[] = [gitPlugin, docsPlugin];
 
 export const buildPluginInstructions = () =>
   plugins

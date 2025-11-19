@@ -20,9 +20,58 @@ const selectedArtifactId = ref<string>();
 const selectedAnchorSlug = ref<string>();
 const contentRef = ref<HTMLElement | null>(null);
 
+const RESPONSIVE_MEDIA_SELECTORS = ['iframe', 'video', 'object', 'embed'];
+const RESPONSIVE_MEDIA_QUERY = RESPONSIVE_MEDIA_SELECTORS.join(', ');
+const VIDEO_CONTAINER_SELECTORS = [
+  'div[data-component-name*="Video"]',
+  'div[data-component-name*="video"]',
+  'div[data-component-name*="Player"]',
+  'div[data-component-name*="player"]',
+  'div[class*="video-player"]',
+  'div[class*="VideoPlayer"]',
+  'div[class*="youtube-player"]',
+  'div[class*="YoutubePlayer"]',
+  'div[data-video-id]',
+  'div[data-youtube-id]'
+];
+const VIDEO_CONTAINER_QUERY = VIDEO_CONTAINER_SELECTORS.join(', ');
+
 const selectedArtifact = computed(() => {
   if (!selectedArtifactId.value) return undefined;
   return state.artifacts.get(selectedArtifactId.value);
+});
+
+const selectedArtifactTitle = computed(() => {
+  const artifact = selectedArtifact.value;
+  if (!artifact) {
+    return '';
+  }
+  const explicitTitle = artifact.lastVersion?.data?.title?.trim();
+  if (explicitTitle) {
+    return explicitTitle;
+  }
+  const displayName = artifact.displayName?.trim();
+  if (displayName) {
+    return displayName;
+  }
+  return artifact.lastVersion?.data?.path ?? artifact.id;
+});
+
+const tableOfContents = computed(() => {
+  const headings = selectedArtifact.value?.lastVersion?.data?.headings;
+  if (!Array.isArray(headings)) {
+    return [];
+  }
+  return headings
+    .map((heading: any) => {
+      const text = (typeof heading === 'string' ? heading : heading?.text)?.replace(/¶/g, '').trim();
+      const anchor = typeof heading === 'string' ? undefined : heading?.anchor;
+      if (!text || !anchor) {
+        return null;
+      }
+      return { text, anchor };
+    })
+    .filter((entry): entry is { text: string; anchor: string } => Boolean(entry));
 });
 
 async function loadSources() {
@@ -102,6 +151,12 @@ function buildTree(artifacts: ArtifactModel[]): { tree: DocsTreeNode[]; pathInde
       pathIndex.set(path, artifact.id);
     }
     const segments = path.split('/').filter(Boolean);
+    const lastSegment = segments.length ? segments[segments.length - 1] : 'index';
+    const leafLabel =
+      artifact.lastVersion?.data?.title ||
+      artifact.displayName ||
+      lastSegment ||
+      artifact.id;
     const versionNode = getVersionNode(versionLabel);
     versionNode.children = versionNode.children ?? [];
 
@@ -109,59 +164,37 @@ function buildTree(artifacts: ArtifactModel[]): { tree: DocsTreeNode[]; pathInde
 
     const walkSegments = segments.length ? segments : ['index'];
     walkSegments.forEach((segment, index) => {
-      const isLeaf = index === walkSegments.length - 1;
       if (!current.children) current.children = [];
 
-      if (isLeaf) {
-        const leaf: DocsTreeNode = {
-          id: artifact.id,
-          label: artifact.displayName || segment || artifact.id,
-          artifactId: artifact.id
-        };
-
-        const headingsRaw = artifact.lastVersion?.data?.headings;
-        if (Array.isArray(headingsRaw) && headingsRaw.length) {
-          const headingNodes = headingsRaw
-            .map((heading: any, idx: number) => {
-              const rawText = typeof heading === 'string' ? heading : heading?.text;
-              const text = rawText?.replace(/¶/g, '').trim();
-              const anchor = typeof heading === 'string' ? undefined : heading?.anchor;
-              if (!text || !anchor) return null;
-              return {
-                id: `${artifact.id}-heading-${idx}`,
-                label: text,
-                artifactId: artifact.id,
-                anchor
-              } as DocsTreeNode;
-            })
-            .filter((node): node is DocsTreeNode => Boolean(node));
-          if (headingNodes.length) {
-            leaf.children = headingNodes;
-          }
-        }
-
-        current.children.push(leaf);
-        return;
-      }
-
       const nodeKey = `${current.id}-${segment}`;
-      let child = current.children.find((childNode) => !childNode.artifactId && childNode.label === segment);
+      let child = current.children.find((childNode) => childNode.id === nodeKey);
       if (!child) {
         child = { id: nodeKey, label: segment, children: [] };
         current.children.push(child);
+      }
+      const isLeaf = index === walkSegments.length - 1;
+      if (isLeaf) {
+        child.label = leafLabel;
+        child.artifactId = artifact.id;
+        child.children = child.children ?? [];
+        return;
       }
       current = child;
     });
   });
 
-  const sortNodes = (nodes?: DocsTreeNode[]) => {
-    if (!nodes) return;
-    nodes.sort((a, b) => a.label.localeCompare(b.label));
-    nodes.forEach((node) => sortNodes(node.children));
-  };
-
   const roots = Array.from(versionMap.values());
-  sortNodes(roots);
+  if (roots.length === 1 && roots[0].label.toLowerCase() === 'unknown') {
+    const onlyRoot = roots[0];
+    if (onlyRoot.children?.length) {
+      onlyRoot.children.forEach((child) => {
+        if (!child.artifactId) {
+          child.label = child.label.replace(/^\//, '');
+        }
+      });
+      return { tree: onlyRoot.children, pathIndex };
+    }
+  }
   return { tree: roots, pathIndex };
 }
 
@@ -188,11 +221,152 @@ function selectArtifact(id: string, anchor?: string) {
   }
 }
 
+function handleTocClick(anchor: string) {
+  if (!anchor) return;
+  selectedAnchorSlug.value = anchor;
+  scrollToAnchor(anchor);
+}
+
 const renderedHtml = computed(() => {
   const html = selectedArtifact.value?.lastVersion?.data?.html;
   if (!html) return '<p>No content found for this page.</p>';
   return html;
 });
+
+function scheduleEmbeddedMediaNormalization() {
+  nextTick(() => {
+    normalizeEmbeddedMedia();
+  });
+}
+
+function normalizeEmbeddedMedia(): void {
+  const container = contentRef.value;
+  if (!container) return;
+
+  container.querySelectorAll<HTMLImageElement>('img, picture img').forEach((img) => {
+    img.style.maxWidth = '100%';
+    img.style.height = 'auto';
+    if (!img.style.display) {
+      img.style.display = 'block';
+    }
+    if (!img.getAttribute('loading')) {
+      img.setAttribute('loading', 'lazy');
+    }
+  });
+
+  container.querySelectorAll<HTMLElement>(RESPONSIVE_MEDIA_QUERY).forEach((element) => {
+    wrapResponsiveElement(element);
+  });
+
+  if (VIDEO_CONTAINER_QUERY.length) {
+    container.querySelectorAll<HTMLElement>(VIDEO_CONTAINER_QUERY).forEach((element) => {
+      if (element.classList.contains('doc-embed-wrapper')) {
+        return;
+      }
+      if (element.querySelector(RESPONSIVE_MEDIA_QUERY)) {
+        return;
+      }
+      wrapResponsiveElement(element);
+    });
+  }
+}
+
+function wrapResponsiveElement(element: HTMLElement): void {
+  const parent = element.parentElement;
+  if (!parent) return;
+
+  const ratio = deriveAspectRatio(element);
+  const existingWrapper = element.closest<HTMLElement>('.doc-embed-wrapper');
+
+  if (existingWrapper) {
+    existingWrapper.style.aspectRatio = ratio;
+  } else {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'doc-embed-wrapper';
+    wrapper.style.aspectRatio = ratio;
+    wrapper.style.width = '100%';
+    parent.insertBefore(wrapper, element);
+    wrapper.appendChild(element);
+  }
+
+  element.classList.add('doc-embed-child');
+  element.style.width = '100%';
+  element.style.height = '100%';
+  if (element instanceof HTMLIFrameElement || element instanceof HTMLVideoElement) {
+    element.style.border = '0';
+  }
+}
+
+function deriveAspectRatio(element: HTMLElement): string {
+  const ratioCandidates = [
+    element.getAttribute('data-aspect-ratio'),
+    element.getAttribute('data-ratio'),
+    element.getAttribute('aspect-ratio'),
+    element.style?.aspectRatio,
+    typeof window !== 'undefined' ? window.getComputedStyle(element).aspectRatio : undefined
+  ];
+
+  for (const candidate of ratioCandidates) {
+    const normalized = normalizeRatioCandidate(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  const widthAttr = parseDimensionAttribute(element.getAttribute('width'));
+  const heightAttr = parseDimensionAttribute(element.getAttribute('height'));
+  if (widthAttr && heightAttr) {
+    return `${widthAttr} / ${heightAttr}`;
+  }
+
+  if (element instanceof HTMLVideoElement) {
+    const videoWidth = element.videoWidth;
+    const videoHeight = element.videoHeight;
+    if (videoWidth > 0 && videoHeight > 0) {
+      return `${videoWidth} / ${videoHeight}`;
+    }
+  }
+
+  return '16 / 9';
+}
+
+function normalizeRatioCandidate(candidate?: string | null): string | undefined {
+  if (!candidate) {
+    return undefined;
+  }
+  const replaced = candidate.replace(/:/g, '/').replace(/\s+/g, ' ').trim();
+  if (!replaced || replaced.toLowerCase() === 'auto') {
+    return undefined;
+  }
+  const slashMatch = replaced.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/);
+  if (slashMatch) {
+    const width = parseFloat(slashMatch[1]);
+    const height = parseFloat(slashMatch[2]);
+    if (width > 0 && height > 0) {
+      return `${width} / ${height}`;
+    }
+  }
+  const numeric = Number(replaced);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return `${numeric}`;
+  }
+  return undefined;
+}
+
+function parseDimensionAttribute(value?: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed || trimmed === 'auto' || trimmed.includes('%')) {
+    return undefined;
+  }
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric;
+  }
+  return undefined;
+}
 
 function scrollToAnchor(anchor: string) {
   nextTick(() => {
@@ -293,9 +467,17 @@ watch(selectedArtifactId, () => {
       contentRef.value?.scrollTo({ top: 0, behavior: 'auto' });
     });
   }
+  scheduleEmbeddedMediaNormalization();
 });
 
-onMounted(loadSources);
+watch(renderedHtml, () => {
+  scheduleEmbeddedMediaNormalization();
+});
+
+onMounted(() => {
+  loadSources();
+  scheduleEmbeddedMediaNormalization();
+});
 
 watch(
   () => state.selectedSourceId,
@@ -311,7 +493,7 @@ watch(
   <div class="docs-browser">
     <div class="sources-panel">
       <header>
-        <h3>Documentation Sources</h3>
+        <h3>Sources</h3>
         <button type="button" class="ghost" @click="loadSources" :disabled="state.loadingSources">
           {{ state.loadingSources ? 'Refreshing…' : 'Refresh' }}
         </button>
@@ -347,7 +529,7 @@ watch(
       <template v-else-if="selectedArtifact">
         <header>
           <div>
-            <h2>{{ selectedArtifact.displayName }}</h2>
+            <h2>{{ selectedArtifactTitle }}</h2>
             <p>
               Version: {{ selectedArtifact.lastVersion?.version ?? '1' }}
               <span v-if="selectedArtifact.lastVersion?.metadata?.packageVersion">
@@ -364,6 +546,16 @@ watch(
             </p>
           </div>
         </header>
+        <div v-if="tableOfContents.length" class="toc-panel">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li v-for="heading in tableOfContents" :key="heading.anchor">
+              <button type="button" @click="handleTocClick(heading.anchor)">
+                {{ heading.text }}
+              </button>
+            </li>
+          </ul>
+        </div>
         <article
           ref="contentRef"
           class="doc-content"
@@ -443,8 +635,52 @@ watch(
   padding-bottom: 0.75rem;
 }
 
-.doc-content :deep(img) {
+.toc-panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  background: #f8fafc;
+  margin-bottom: 1rem;
+}
+
+.toc-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #64748b;
+  margin: 0 0 0.5rem;
+}
+
+.toc-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.toc-panel button {
+  width: 100%;
+  border: none;
+  background: none;
+  text-align: left;
+  padding: 0.2rem 0.25rem;
+  border-radius: 0.35rem;
+  font-size: 0.9rem;
+  color: #1d4ed8;
+  cursor: pointer;
+}
+
+.toc-panel button:hover {
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.doc-content :deep(img),
+.doc-content :deep(picture img) {
   max-width: 100%;
+  height: auto;
+  display: block;
 }
 
 .doc-content :deep(pre) {
@@ -511,6 +747,27 @@ watch(
 .doc-content :deep(h5:hover .hash-link),
 .doc-content :deep(h6:hover .hash-link) {
   opacity: 1;
+}
+
+.doc-content :deep(.doc-embed-wrapper) {
+  width: 100%;
+  max-width: 100%;
+  display: block;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  background: #0f172a;
+  margin: 1.25rem 0;
+}
+
+.doc-content :deep(.doc-embed-wrapper .doc-embed-child),
+.doc-content :deep(.doc-embed-wrapper iframe),
+.doc-content :deep(.doc-embed-wrapper video),
+.doc-content :deep(.doc-embed-wrapper embed),
+.doc-content :deep(.doc-embed-wrapper object) {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
 }
 
 .placeholder {

@@ -571,6 +571,41 @@ export class ArtifactRepository {
     return row ? mapArtifactSummaryRow(row) : null;
   }
 
+  async findDocsArtifactByPath(sourceId: string, path: string): Promise<ArtifactSummary | null> {
+    const query = `
+      SELECT
+        a.id,
+        a."displayName" AS display_name,
+        a."pluginKey" AS plugin_key,
+        a."externalId" AS external_id,
+        s.id AS source_id,
+        s."name" AS source_name,
+        s."pluginKey" AS source_plugin_key,
+        a.last_version_id,
+        v.version,
+        v.metadata AS version_metadata,
+        v.data AS version_data,
+        v."originalUrl" AS original_url,
+        v.timestamp AS version_timestamp,
+        v.checksum,
+        v."createdAt" AS version_created_at,
+        a."createdAt" AS created_at,
+        a."updatedAt" AS updated_at
+      FROM artifacts a
+      LEFT JOIN sources s ON s.id = a.source_id
+      LEFT JOIN artifact_versions v ON v.id = a.last_version_id
+      WHERE a."pluginKey" = 'docs'
+        AND a.source_id = $1
+        AND v.data ->> 'path' = $2
+      ORDER BY a."updatedAt" DESC
+      LIMIT 1
+    `;
+
+    const { rows } = await this.pool.query<ArtifactSummaryRow>(query, [sourceId, path]);
+    const row = rows[0];
+    return row ? mapArtifactSummaryRow(row) : null;
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }

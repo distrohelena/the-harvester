@@ -2,7 +2,6 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import axios, { AxiosInstance, RawAxiosResponseHeaders } from 'axios';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
-import { marked } from 'marked';
 import { Plugin, PluginNavigationPayload, NormalizedArtifact, PluginExtractContext } from '../interfaces.js';
 import { SourceEntity } from '../../sources/source.entity.js';
 
@@ -49,7 +48,7 @@ interface DocsVersion {
 }
 
 const DEFAULT_CONTENT_SELECTORS = ['article', 'main', '#content'];
-const DEFAULT_TITLE_SELECTORS = ['h1', 'title'];
+const DEFAULT_TITLE_SELECTORS = ['title', 'h1'];
 const DEFAULT_HEADING_SELECTORS = ['h2', 'h3'];
 const VERSION_SELECTOR_HINTS = [
   '[data-docs-version]',
@@ -755,12 +754,6 @@ export class DocsPlugin implements Plugin {
         continue;
       }
 
-      const markdownVariant = await this.maybeUseMarkdownVariant(http, url, document);
-      if (markdownVariant) {
-        url = markdownVariant.url;
-        document = markdownVariant.document;
-      }
-
       const $ = cheerio.load(document.html);
       const artifact = this.buildArtifact(version, effectivePath, $, url, document.headers, options);
       if (artifact) {
@@ -806,6 +799,8 @@ export class DocsPlugin implements Plugin {
     headers: RawAxiosResponseHeaders,
     options: NormalizedDocsOptions
   ): NormalizedArtifact | null {
+    this.stripPageChrome($);
+    this.ensureHeadingAnchors($, options.headingSelectors);
     const title = this.sanitizeTitle(this.pickFirstText($, options.titleSelectors) || 'Untitled');
     const html = this.extractContentHtml($, options);
     if (!html) {
@@ -818,7 +813,8 @@ export class DocsPlugin implements Plugin {
     const timestamp = this.extractTimestamp(headers);
     const metadata: Record<string, any> = {
       versionKey: version.key,
-      versionRoot: version.rootUrl
+      versionRoot: version.rootUrl,
+      versionBasePath: this.getVersionBasePath(version)
     };
     const packageVersion = this.detectPackageVersion($, title, version.label);
     if (packageVersion) {
@@ -848,6 +844,22 @@ export class DocsPlugin implements Plugin {
     this.logger.debug(`DocsPlugin [${resolvedVersion}] processed ${path} (${url})`);
 
     return artifactPayload;
+  }
+
+  private stripPageChrome($: cheerio.CheerioAPI): void {
+    // XRPL and similar portals inject heavy UI controls (PageActions menu + LinkIcon SVGs)
+    // directly into headings; strip them so they do not dominate harvested content.
+    const chromeSelectors = [
+      '[class*="PageActions"]',
+      '[class*="pageactions"]',
+      '[class*="page-actions"]',
+      '[data-component-name*="PageActions"]',
+      '[data-component-name*="pageactions"]',
+      '[data-component-name*="page-actions"]',
+      'svg[class*="LinkIcon"]',
+      'svg[data-component-name*="LinkIcon"]'
+    ];
+    $(chromeSelectors.join(', ')).remove();
   }
 
   private extractLinks(
@@ -933,11 +945,63 @@ export class DocsPlugin implements Plugin {
   }
 
   private extractContentHtml($: cheerio.CheerioAPI, options: NormalizedDocsOptions): string | undefined {
+    const articleContent = this.pickArticleHtml($);
+    if (articleContent) {
+      return articleContent;
+    }
     const explicit = this.pickFirstHtml($, options.contentSelectors);
     if (explicit) {
       return explicit;
     }
     return this.autoDetectContentHtml($);
+  }
+
+  private pickArticleHtml($: cheerio.CheerioAPI): string | undefined {
+    const selectorGroups = [
+      { selector: 'main article', priority: 3 },
+      { selector: '[role="main"] article, article[role="main"]', priority: 2 },
+      { selector: 'article', priority: 1 }
+    ];
+    const processed = new WeakSet<AnyNode>();
+    let best: { html: string; score: number } | undefined;
+
+    selectorGroups.forEach(({ selector, priority }) => {
+      $(selector)
+        .toArray()
+        .forEach((element) => {
+          if (processed.has(element)) {
+            return;
+          }
+          processed.add(element);
+          const node = $(element);
+          const text = node.text().replace(/\s+/g, ' ').trim();
+          if (text.length < 80) {
+            return;
+          }
+          const html = $.html(element);
+          if (!html) {
+            return;
+          }
+
+          let score = this.scoreContentCandidate(node, text.length, selector);
+          score += priority * 150;
+          if (node.is('[role="main"]') || node.parents('main, [role="main"]').length > 0) {
+            score += 120;
+          }
+          const headingCount = node.find('h1, h2').length;
+          if (headingCount > 0) {
+            score += headingCount * 25;
+          }
+          const depthPenalty = Math.min(node.parents().length, 8) * 4;
+          score -= depthPenalty;
+
+          if (!best || score > best.score) {
+            best = { html, score };
+          }
+        });
+    });
+
+    return best?.html;
   }
 
   private autoDetectContentHtml($: cheerio.CheerioAPI): string | undefined {
@@ -1061,29 +1125,85 @@ export class DocsPlugin implements Plugin {
     return penalty;
   }
 
+  private ensureHeadingAnchors($: cheerio.CheerioAPI, selectors: string[]): void {
+    const normalizedSelectors = selectors.map((selector) => selector?.trim()).filter(Boolean);
+    if (!normalizedSelectors.length) {
+      return;
+    }
+    const combinedSelector = normalizedSelectors.join(', ');
+    const usedAnchors = new Set<string>();
+    $(combinedSelector)
+      .toArray()
+      .forEach((element) => {
+        const node = $(element);
+        const text = node.text().replace(/\s+/g, ' ').trim();
+        if (!text) {
+          return;
+        }
+        const existing = this.resolveHeadingAnchor(node);
+        if (existing) {
+          usedAnchors.add(existing);
+          return;
+        }
+        const base = this.slugify(text);
+        if (!base) {
+          return;
+        }
+        let candidate = base;
+        let suffix = 2;
+        while (usedAnchors.has(candidate)) {
+          candidate = `${base}-${suffix}`;
+          suffix += 1;
+        }
+        node.attr('id', candidate);
+        usedAnchors.add(candidate);
+      });
+  }
+
+  private resolveHeadingAnchor(node: cheerio.Cheerio<AnyNode>): string | undefined {
+    const direct = node.attr('id')?.trim();
+    if (direct) {
+      return direct;
+    }
+    const descendantWithId = node.find('[id]').attr('id')?.trim();
+    if (descendantWithId) {
+      return descendantWithId;
+    }
+    const hashLink = node.find('a[href^="#"]').attr('href');
+    if (hashLink) {
+      const normalized = hashLink.replace(/^#/, '').trim();
+      if (normalized) {
+        return normalized;
+      }
+    }
+    return undefined;
+  }
+
   private collectHeadings(
     $: cheerio.CheerioAPI,
     selectors: string[]
   ): Array<{ text: string; anchor: string }> {
     const headings: Array<{ text: string; anchor: string }> = [];
-    selectors.forEach((selector) => {
-      $(selector)
-        .toArray()
-        .forEach((element) => {
-          const text = $(element).text().replace(/\s+/g, ' ').trim();
+    const normalizedSelectors = selectors.map((selector) => selector?.trim()).filter(Boolean);
+    if (!normalizedSelectors.length) {
+      return headings;
+    }
+
+    const combinedSelector = normalizedSelectors.join(', ');
+    $(combinedSelector)
+      .toArray()
+      .forEach((element) => {
+          const node = $(element);
+          const text = node.text().replace(/\s+/g, ' ').trim();
           if (!text) {
             return;
           }
-          const node = $(element);
-          const anchor =
-            node.attr('id') ??
-            node.find('[id]').attr('id') ??
-            node.find('a[id]').attr('id') ??
-            node.find('a[href^="#"]').attr('href')?.replace(/^#/, '') ??
-            this.slugify(text);
-          headings.push({ text, anchor });
-        });
-    });
+        const anchor = this.resolveHeadingAnchor(node) ?? this.slugify(text);
+        if (!anchor) {
+          return;
+        }
+        headings.push({ text, anchor });
+      });
     return headings;
   }
 
@@ -1315,6 +1435,16 @@ export class DocsPlugin implements Plugin {
     };
   }
 
+  private getVersionBasePath(version: DocsVersion): string {
+    try {
+      const parsed = new URL(version.rootUrl);
+      const pathname = parsed.pathname || '/';
+      return pathname.endsWith('/') ? pathname : `${pathname}/`;
+    } catch {
+      return '/';
+    }
+  }
+
   private resolveVersionRoot(baseUrl: string, rawPath: string): string {
     const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
     const cleanedPath = rawPath.trim();
@@ -1346,94 +1476,6 @@ export class DocsPlugin implements Plugin {
         this.logger.debug(`DocsPlugin failed to fetch ${url}: ${error instanceof Error ? error.message : error}`);
         return null;
       });
-  }
-
-  private async maybeUseMarkdownVariant(
-    http: AxiosInstance,
-    url: string,
-    document: { html: string; headers: RawAxiosResponseHeaders }
-  ): Promise<{ url: string; document: { html: string; headers: RawAxiosResponseHeaders } } | null> {
-    if (!/view as markdown/i.test(document.html)) {
-      return null;
-    }
-    const markdownUrl = this.buildMarkdownUrl(url);
-    if (!markdownUrl) {
-      return null;
-    }
-    const markdownDocument = await this.fetchMarkdownDocument(http, markdownUrl);
-    if (!markdownDocument) {
-      return null;
-    }
-    this.logger.debug(`DocsPlugin switched to markdown variant for ${markdownUrl}.`);
-    return { url: markdownUrl, document: markdownDocument };
-  }
-
-  private buildMarkdownUrl(originalUrl: string): string | null {
-    try {
-      const parsed = new URL(originalUrl);
-      if (parsed.pathname.endsWith('.md')) {
-        return parsed.toString();
-      }
-      if (parsed.pathname.endsWith('.html')) {
-        parsed.pathname = parsed.pathname.replace(/\.html?$/, '.md');
-      } else if (parsed.pathname.endsWith('/')) {
-        parsed.pathname = `${parsed.pathname}index.md`;
-      } else {
-        parsed.pathname = `${parsed.pathname}.md`;
-      }
-      return parsed.toString();
-    } catch (error) {
-      this.logger.debug(
-        `DocsPlugin could not build markdown URL from ${originalUrl}: ${error instanceof Error ? error.message : error}`
-      );
-      return null;
-    }
-  }
-
-  private async fetchMarkdownDocument(
-    http: AxiosInstance,
-    url: string
-  ): Promise<{ html: string; headers: RawAxiosResponseHeaders } | null> {
-    try {
-      const response = await http.get<string>(url, { responseType: 'text', transformResponse: (data) => data });
-      const markdown = typeof response.data === 'string' ? response.data : '';
-      const html = marked.parse(markdown);
-      const wrappedHtml = `<article class="markdown-doc">${html}</article>`;
-      const rewrittenHtml = this.rewriteRelativeUrls(wrappedHtml, url);
-      return { html: rewrittenHtml, headers: response.headers as RawAxiosResponseHeaders };
-    } catch (error) {
-      this.logger.debug(
-        `DocsPlugin failed to fetch markdown variant ${url}: ${error instanceof Error ? error.message : error}`
-      );
-      return null;
-    }
-  }
-
-  private rewriteRelativeUrls(html: string, baseUrl: string): string {
-    const $ = cheerio.load(html);
-    const rewrite = (selector: string, attribute: string) => {
-      $(selector).each((_, element) => {
-        const node = $(element);
-        const value = node.attr(attribute);
-        if (!value) {
-          return;
-        }
-        const trimmed = value.trim();
-        if (!trimmed || trimmed.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
-          return;
-        }
-        try {
-          const absolute = new URL(trimmed, baseUrl).toString();
-          node.attr(attribute, absolute);
-        } catch {
-          // ignore invalid URLs
-        }
-      });
-    };
-
-    rewrite('a[href]', 'href');
-    rewrite('[src]', 'src');
-    return $.root().html() ?? html;
   }
 
   private buildExternalId(versionKey: string, path: string): string {

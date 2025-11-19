@@ -9,4 +9,8 @@ test('buildServerInstructions combines base and plugin instructions', () => {
     instructions.includes('git-search-commits'),
     'should include git plugin guidance in instructions'
   );
+  assert.ok(
+    instructions.includes('docs-follow-link'),
+    'should include docs plugin guidance in instructions'
+  );
 });

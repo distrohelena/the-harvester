@@ -6,9 +6,14 @@ This package exposes the Artifact Harvester database via the [Model Context Prot
 - **list-sources tool** – enumerates up to 1000+ projects with plugin keys, active status, and artifact counts so users/LLMs can pick targets before searching.
 - **search-artifacts tool** – free-text search across names, plugin keys, metadata, and source info with cursor-based pagination.
 - **artifact://{artifactId} resource** – resolves to the latest artifact snapshot (metadata + JSON payload) with autocomplete and a recent-artifacts listing.
+- **docs-follow-link tool** – feed an extracted documentation artifact ID plus a hyperlink from its HTML to jump straight to the harvested destination page instead of reopening the public site.
 - **git-search-commits tool** – filters git commit artifacts per source with the associated file artifacts so agents can jump straight to the relevant paths.
 - **git-commit-diff tool** – renders commit metadata plus unified diffs (text files only) so LLMs can reason about delta data the same way GitMCP does.
 - Designed to scale for thousands of projects by letting clients discover scopes first, then narrow searches.
+
+### Docs workflows
+1. Use `search-artifacts` (optionally scoped by `sourceId`) to locate the docs page you’re reading inside your MCP client.
+2. When the rendered HTML contains an internal link, call `docs-follow-link` with the current artifact ID and the link’s href. The tool maps the URL back to the harvested path and returns the target artifact (plus an `artifact://` link) so you can continue browsing entirely within the knowledge base.
 
 ### Git workflows
 1. Call `list-sources` and grab the source ID for the git project you care about.
