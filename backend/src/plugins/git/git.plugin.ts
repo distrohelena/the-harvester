@@ -1,4 +1,6 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { chmod, mkdtemp, rm, writeFile } from 'fs/promises';
@@ -11,6 +13,7 @@ import {
   PluginExtractContext
 } from '../interfaces.js';
 import { SourceEntity } from '../../sources/source.entity.js';
+import { ArtifactEntity } from '../../artifacts/artifact.entity.js';
 
 interface GitPluginOptions {
   repoUrl?: string;
@@ -86,6 +89,11 @@ interface DiffTreeEntry {
 export class GitPlugin implements Plugin {
   private readonly logger = new Logger(GitPlugin.name);
   private readonly gitCmd = 'git';
+
+  constructor(
+    @InjectRepository(ArtifactEntity)
+    private readonly artifactsRepository: Repository<ArtifactEntity>
+  ) {}
 
   readonly descriptor = {
     key: 'git',
@@ -189,7 +197,21 @@ export class GitPlugin implements Plugin {
         return [];
       }
 
+      const existingCommits = await this.findExistingCommitExternalIds(
+        source.id,
+        options.repoSlug,
+        commits
+      );
+
       for (const commitHash of commits) {
+        const commitExternalId = this.buildCommitExternalId(options.repoSlug, commitHash);
+        if (existingCommits.has(commitExternalId)) {
+          this.logger.debug(
+            `GitPlugin skipping commit ${commitHash} for ${options.repoUrl} (already harvested).`
+          );
+          continue;
+        }
+
         const branches = Array.from(branchMap.get(commitHash) ?? []);
         const commitMetadata = await this.readCommitMetadata(repoPath, commitHash);
         const changes = await this.readCommitChanges(
@@ -251,6 +273,7 @@ export class GitPlugin implements Plugin {
         );
 
         await emitBatch([...fileArtifacts, commitArtifact]);
+        existingCommits.add(commitExternalId);
       }
       this.logger.log(
         `GitPlugin captured ${totalFileArtifactsCaptured} file artifact(s) across ${totalCommitsProcessed} commit(s) (${totalChangesCaptured} change entries) for ${options.repoUrl}.`
@@ -466,9 +489,10 @@ export class GitPlugin implements Plugin {
   ): NormalizedArtifact {
     const displayName = `${commitHash.slice(0, 7)} ${metadata.subject}`;
     const fileExternalIds = fileArtifacts.map((artifact) => artifact.externalId);
+    const externalId = this.buildCommitExternalId(options.repoSlug, commitHash);
 
     return {
-      externalId: `${options.repoSlug}:${commitHash}`,
+      externalId,
       displayName,
       version: commitHash,
       data: {
@@ -768,6 +792,10 @@ export class GitPlugin implements Plugin {
     return `${repoSlug}:file:${commitHash}:${hash}`;
   }
 
+  private buildCommitExternalId(repoSlug: string, commitHash: string): string {
+    return `${repoSlug}:${commitHash}`;
+  }
+
   private updateSnapshotState(
     state: Map<string, SnapshotFileReference>,
     changes: CommitFileChange[],
@@ -819,6 +847,25 @@ export class GitPlugin implements Plugin {
       }
     }
     return true;
+  }
+
+  private async findExistingCommitExternalIds(
+    sourceId: string,
+    repoSlug: string,
+    commitHashes: string[]
+  ): Promise<Set<string>> {
+    if (!commitHashes.length) {
+      return new Set();
+    }
+    const externalIds = commitHashes.map((hash) => this.buildCommitExternalId(repoSlug, hash));
+    const rows = await this.artifactsRepository
+      .createQueryBuilder('artifact')
+      .select('artifact.externalId', 'externalId')
+      .where('artifact.source_id = :sourceId', { sourceId })
+      .andWhere('artifact.pluginKey = :pluginKey', { pluginKey: 'git' })
+      .andWhere('artifact.externalId IN (:...externalIds)', { externalIds })
+      .getRawMany<{ externalId: string }>();
+    return new Set(rows.map((row) => row.externalId));
   }
 
   private async cleanupRepository(repoPath: string) {

@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "echo \"No tests\""
+    "test": "tsx --test test/**/*.test.ts"
   },
   "keywords": [],
   "author": "",

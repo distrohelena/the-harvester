@@ -30,7 +30,7 @@ type EnrichedGitFileChange = GitCommitChange & {
   previousFileArtifactUri?: string;
 };
 
-type EnrichedGitCommit = GitCommitSummary & {
+type EnrichedGitCommit = Omit<GitCommitSummary, 'changes'> & {
   files: EnrichedGitFileChange[];
   artifactUri: string;
 };
@@ -88,11 +88,14 @@ const gitCommitChangeSchema = z.object({
   path: z.string(),
   previousPath: z.string().optional(),
   status: z.string().optional(),
+  mode: z.string().optional(),
+  previousMode: z.string().optional(),
   blobSha: z.string().optional(),
   previousBlobSha: z.string().optional(),
   size: z.number().optional(),
   fileArtifactId: z.string().optional(),
   fileArtifactUri: z.string().optional(),
+  fileDisplayName: z.string().optional(),
   previousFileArtifactId: z.string().optional(),
   previousFileArtifactUri: z.string().optional()
 });
@@ -127,6 +130,7 @@ const gitCommitSchema = z.object({
       date: z.string().optional()
     })
     .optional(),
+  fileExternalIds: z.array(z.string()),
   files: z.array(gitCommitChangeSchema)
 });
 
@@ -298,8 +302,9 @@ const registerGitDiffTool = (server: McpServer, repository: ArtifactRepository) 
         diffs.push(diff);
       }
 
+      const { changes: _diffChanges, ...commitInfo } = commitData;
       const commitSummary: EnrichedGitCommit = {
-        ...commitData,
+        ...commitInfo,
         artifactUri: `artifact://${commitArtifact.id}`,
         files
       };
@@ -341,8 +346,9 @@ const enrichCommitsWithFiles = async (
 
   const items: EnrichedGitCommit[] = result.items.map((commit) => {
     const files = resolveFileChanges(commit, fileIndex);
+    const { changes: _unusedChanges, ...summary } = commit;
     return {
-      ...commit,
+      ...summary,
       files,
       artifactUri: `artifact://${commit.artifactId}`
     };

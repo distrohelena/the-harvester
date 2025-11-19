@@ -11,7 +11,8 @@ import { config } from './config.js';
 import { ArtifactRepository } from './artifact-repository.js';
 import type { ArtifactSummary, SearchArtifactsParams } from './artifact-repository.js';
 import { formatArtifactSummary, formatSourceSummary } from './formatters.js';
-import { registerPlugins, buildPluginInstructions } from './plugins/index.js';
+import { registerPlugins } from './plugins/index.js';
+import { buildServerInstructions } from './server-instructions.js';
 
 const repository = new ArtifactRepository(config.databaseUrl);
 
@@ -86,14 +87,6 @@ const sourceSchema = z.object({
 const listSourcesOutputSchema = z.object({
   items: z.array(sourceSchema)
 });
-
-const BASE_INSTRUCTIONS =
-  'Use list-sources to discover available projects, search-artifacts to filter them, and artifact://{artifactId} to inspect details.';
-
-const buildServerInstructions = () => {
-  const pluginInstructions = buildPluginInstructions();
-  return pluginInstructions ? `${BASE_INSTRUCTIONS} ${pluginInstructions}` : BASE_INSTRUCTIONS;
-};
 
 const createServer = () => {
   const server = new McpServer(
