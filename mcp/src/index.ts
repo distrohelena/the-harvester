@@ -11,7 +11,7 @@ import { config } from './config.js';
 import { ArtifactRepository } from './artifact-repository.js';
 import type { ArtifactSummary, SearchArtifactsParams } from './artifact-repository.js';
 import { formatArtifactSummary, formatSourceSummary } from './formatters.js';
-import { registerGitTools } from './git-tools.js';
+import { registerPlugins, buildPluginInstructions } from './plugins/index.js';
 
 const repository = new ArtifactRepository(config.databaseUrl);
 
@@ -87,6 +87,14 @@ const listSourcesOutputSchema = z.object({
   items: z.array(sourceSchema)
 });
 
+const BASE_INSTRUCTIONS =
+  'Use list-sources to discover available projects, search-artifacts to filter them, and artifact://{artifactId} to inspect details.';
+
+const buildServerInstructions = () => {
+  const pluginInstructions = buildPluginInstructions();
+  return pluginInstructions ? `${BASE_INSTRUCTIONS} ${pluginInstructions}` : BASE_INSTRUCTIONS;
+};
+
 const createServer = () => {
   const server = new McpServer(
     {
@@ -94,15 +102,14 @@ const createServer = () => {
       version: packageJson.version ?? '0.0.0'
     },
     {
-      instructions:
-        'Use list-sources to discover available projects, search-artifacts to filter them, artifact://{artifactId} to inspect details, and git-search-commits / git-commit-diff when you need git history plus per-file diffs.'
+      instructions: buildServerInstructions()
     }
   );
 
   registerListSourcesTool(server);
   registerSearchTool(server);
   registerArtifactResource(server);
-  registerGitTools(server, repository, config.maxSearchResults);
+  registerPlugins({ server, repository, config });
 
   return server;
 };

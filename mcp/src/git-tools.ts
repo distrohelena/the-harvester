@@ -14,6 +14,7 @@ import type {
   GitCommitSummary,
   GitFileArtifactSummary
 } from './artifact-repository.js';
+import type { McpServerPlugin, PluginContext } from './plugins/types.js';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_DIFF_FILE_LIMIT = 5;
@@ -41,13 +42,18 @@ type GitDiffResult = EnrichedGitFileChange & {
   note?: string;
 };
 
-export const registerGitTools = (
-  server: McpServer,
-  repository: ArtifactRepository,
-  maxSearchResults: number
-) => {
-  registerSearchGitCommitsTool(server, repository, maxSearchResults);
+const registerGitTools = ({ server, repository, config }: PluginContext) => {
+  registerSearchGitCommitsTool(server, repository, config.maxSearchResults);
   registerGitDiffTool(server, repository);
+};
+
+export const gitPlugin: McpServerPlugin = {
+  key: 'git',
+  instructions:
+    'Use git-search-commits to browse harvested commit history and git-commit-diff for per-file diffs plus file artifacts.',
+  register: (context) => {
+    registerGitTools(context);
+  }
 };
 
 const gitSearchInputSchema = (maxSearchResults: number) =>
