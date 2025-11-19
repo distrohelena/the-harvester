@@ -32,6 +32,8 @@ This repo follows the `AGENTS.md` specification for a plugin-driven artifact ext
 - Tools:
   - `list-sources` to enumerate thousands of projects with plugin key + activity flags.
   - `search-artifacts` with cursor-based pagination across names, metadata, and plugin info.
+  - `git-search-commits` mirrors GitMCP by listing commits + their changed files for a given source so you can jump straight to relevant artifacts.
+  - `git-commit-diff` renders per-file unified diffs (text files) so LLMs can reason about delta data and link directly to the backing file artifacts.
 - Resource template `artifact://{artifactId}` exposes formatted summaries and raw metadata for any artifact with autocomplete + recent listings.
 - Configurable via env vars (`DATABASE_URL`, `MCP_HTTP_PORT`, etc.) so you can deploy it alongside the backend and let MCP clients query every indexed project.
 
@@ -81,7 +83,7 @@ This makes it easy to point the harvester at frameworks whose docs publish multi
 The `jira` plugin mirrors the workflow used in the standalone Jira VS Code extension: supply the Jira site URL plus your user email + API token and the harvester automatically:
 
 - Discovers every accessible project through Jira's REST API.
-- Pulls the latest issues for each project (up to 200 per project) with their summary, status, assignee, labels, and timestamps.
+- Pulls the latest issues for each project (leave the recent limit blank to fetch everything, or set a cap if you only need the most recent tickets) with their summary, status, assignee, labels, and timestamps.
 - Builds navigation grouped by project → status, so you can browse tickets the same way as the editor integration.
 
 No extra configuration is required—just point it at a Jira tenant and the extractor handles pagination, legacy endpoint fallbacks, and artifact normalization. On the frontend the **Plugins → Jira** tab lists sources, renders projects/issues, and links directly back to Jira for deeper actions.

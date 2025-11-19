@@ -11,6 +11,7 @@ import { config } from './config.js';
 import { ArtifactRepository } from './artifact-repository.js';
 import type { ArtifactSummary, SearchArtifactsParams } from './artifact-repository.js';
 import { formatArtifactSummary, formatSourceSummary } from './formatters.js';
+import { registerGitTools } from './git-tools.js';
 
 const repository = new ArtifactRepository(config.databaseUrl);
 
@@ -94,13 +95,14 @@ const createServer = () => {
     },
     {
       instructions:
-        'Use list-sources to discover available projects, search-artifacts to filter them, and artifact://{artifactId} to inspect details.'
+        'Use list-sources to discover available projects, search-artifacts to filter them, artifact://{artifactId} to inspect details, and git-search-commits / git-commit-diff when you need git history plus per-file diffs.'
     }
   );
 
   registerListSourcesTool(server);
   registerSearchTool(server);
   registerArtifactResource(server);
+  registerGitTools(server, repository, config.maxSearchResults);
 
   return server;
 };
@@ -244,6 +246,19 @@ const startStdioServer = async () => {
 const startHttpServer = async () => {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    const requestedHeaders =
+      req.header('Access-Control-Request-Headers') ?? 'content-type,mcp-session-id';
+    res.header('Access-Control-Allow-Headers', requestedHeaders);
+    res.header('Access-Control-Expose-Headers', 'mcp-session-id');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
 
   const healthPath = config.httpPath.endsWith('/') ? `${config.httpPath}health` : `${config.httpPath}/health`;
   app.get(healthPath, (_req, res) => {

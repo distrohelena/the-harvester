@@ -6,7 +6,17 @@ This package exposes the Artifact Harvester database via the [Model Context Prot
 - **list-sources tool** – enumerates up to 1000+ projects with plugin keys, active status, and artifact counts so users/LLMs can pick targets before searching.
 - **search-artifacts tool** – free-text search across names, plugin keys, metadata, and source info with cursor-based pagination.
 - **artifact://{artifactId} resource** – resolves to the latest artifact snapshot (metadata + JSON payload) with autocomplete and a recent-artifacts listing.
+- **git-search-commits tool** – filters git commit artifacts per source with the associated file artifacts so agents can jump straight to the relevant paths.
+- **git-commit-diff tool** – renders commit metadata plus unified diffs (text files only) so LLMs can reason about delta data the same way GitMCP does.
 - Designed to scale for thousands of projects by letting clients discover scopes first, then narrow searches.
+
+### Git workflows
+1. Call `list-sources` and grab the source ID for the git project you care about.
+2. Use `git-search-commits` with that `sourceId`, optional `branch`, and optional `query` (hash prefixes, keywords, or file paths) to enumerate commits plus their changed files. Each commit/file includes an `artifact://` URI for deep inspection.
+3. Invoke `git-commit-diff` with the commit’s artifact ID (or `sourceId` + `commitHash`) to fetch per-file diffs. You can optionally pass `filePath` to focus on a single file or `maxFiles` to widen/narrow the diff.
+4. Use the `artifact://` resource to pull the full JSON payloads for commits or files if you need metadata beyond the textual summary.
+
+Binary files are skipped (the diff response explains why) and extremely large blobs fall back to artifact links, preventing runaway responses while still surfacing actionable context. Textual diffs are generated via the host `diff` binary, so make sure it’s available on the machine running the MCP server (standard GNU diff on Linux/macOS works fine).
 
 ## Setup
 ```bash

@@ -30,10 +30,18 @@ const activeTab = ref<'docs' | 'confluence' | 'git' | 'jira'>('docs');
     </div>
 
     <section class="tab-content">
-      <DocsBrowser v-if="activeTab === 'docs'" />
-      <ConfluenceBrowser v-else-if="activeTab === 'confluence'" />
-      <GitBrowser v-else-if="activeTab === 'git'" />
-      <JiraBrowser v-else />
+      <div v-if="activeTab === 'docs'" class="tab-panel">
+        <DocsBrowser class="tab-panel__content" />
+      </div>
+      <div v-else-if="activeTab === 'confluence'" class="tab-panel">
+        <ConfluenceBrowser class="tab-panel__content" />
+      </div>
+      <div v-else-if="activeTab === 'git'" class="tab-panel">
+        <GitBrowser class="tab-panel__content" />
+      </div>
+      <div v-else class="tab-panel">
+        <JiraBrowser class="tab-panel__content" />
+      </div>
     </section>
   </div>
 </template>
@@ -43,6 +51,8 @@ const activeTab = ref<'docs' | 'confluence' | 'git' | 'jira'>('docs');
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  height: 100%;
+  min-height: 0;
 }
 
 .tab-bar {
@@ -69,5 +79,23 @@ const activeTab = ref<'docs' | 'confluence' | 'git' | 'jira'>('docs');
   border-radius: 0.5rem;
   padding: 1rem;
   background: #fff;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.tab-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tab-panel__content {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
 }
 </style>

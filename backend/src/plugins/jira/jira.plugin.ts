@@ -22,7 +22,7 @@ interface JiraPluginOptions {
 interface NormalizedJiraOptions {
   baseUrl: string;
   authHeader: string;
-  recentItems: number;
+  recentItems?: number;
   includedProjects?: string[];
 }
 
@@ -86,7 +86,7 @@ export class JiraPlugin implements Plugin {
           name: 'recentItems',
           label: 'Recent Items',
           type: 'number',
-          description: 'Maximum number of recent issues to fetch per project (default: 300)'
+          description: 'Leave blank to fetch all issues; set a number to limit how many recent issues are fetched per project'
         },
         {
           name: 'includedProjects',
@@ -238,7 +238,8 @@ export class JiraPlugin implements Plugin {
         : typeof raw.recentItems === 'number'
         ? raw.recentItems
         : Number.parseInt(String(raw.recentItems), 10);
-    const recentItems = Number.isFinite(parsedRecent) && parsedRecent > 0 ? parsedRecent : 300;
+    const recentItems =
+      Number.isFinite(parsedRecent) && parsedRecent > 0 ? parsedRecent : undefined;
     const includedProjects = Array.isArray(raw.includedProjects)
       ? raw.includedProjects
       : typeof raw.includedProjects === 'string'
@@ -339,13 +340,16 @@ export class JiraPlugin implements Plugin {
     }
 
     const pageSize = 50;
-    const maxIssues = Math.max(options.recentItems ?? 300, 1);
+    const maxIssues =
+      typeof options.recentItems === 'number' && Number.isFinite(options.recentItems)
+        ? Math.max(options.recentItems, 1)
+        : undefined;
     const aggregated: JiraIssue[] = [];
     let startAt = 0;
     let nextPageToken: string | undefined;
     let hasMore = true;
 
-    while (hasMore && aggregated.length < maxIssues) {
+    while (hasMore && (maxIssues === undefined || aggregated.length < maxIssues)) {
       const page = await this.searchIssues(
         options,
         `project = "${projectKey}" ORDER BY updated DESC`,
@@ -372,12 +376,12 @@ export class JiraPlugin implements Plugin {
       } else {
         hasMore = false;
       }
-      if (aggregated.length >= maxIssues) {
+      if (maxIssues !== undefined && aggregated.length >= maxIssues) {
         break;
       }
     }
 
-    return aggregated.slice(0, maxIssues);
+    return maxIssues === undefined ? aggregated : aggregated.slice(0, maxIssues);
   }
 
   private async searchIssues(

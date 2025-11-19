@@ -3,16 +3,36 @@ import { computed, onMounted, ref, watch } from 'vue';
 import GitCommitViewer from './GitCommitViewer.vue';
 import type { ArtifactModel, ArtifactVersionModel, SourceModel } from '../../types/plugins';
 import { fetchSources } from '../../api/sources';
-import { fetchGitCommits, fetchGitFiles } from '../../api/git';
+import {
+  fetchGitCommits,
+  fetchGitFiles,
+  fetchGitCommitSnapshot,
+  fetchGitCommitSnapshotFile,
+  type GitSnapshotEntry,
+  type GitSnapshotFileResponse
+} from '../../api/git';
+
+type FileArtifactPayload = {
+  artifactId: string;
+  path: string;
+  commitHash: string;
+  blobSha?: string;
+  mode?: string;
+  size?: number;
+  encoding: 'utf8' | 'base64';
+  content: string;
+};
 
 const sources = ref<SourceModel[]>([]);
 const artifacts = ref<ArtifactModel[]>([]);
 const fileArtifacts = ref<ArtifactModel[]>([]);
+const snapshotFiles = ref<GitSnapshotEntry[]>([]);
 const selectedSourceId = ref<string>();
 const selectedArtifactId = ref<string>();
 const loadingSources = ref(false);
 const loadingArtifacts = ref(false);
 const loadingFiles = ref(false);
+const loadingSnapshot = ref(false);
 const pagination = ref({ page: 1, limit: 25, total: 0 });
 const viewMode = ref<'files' | 'commits'>('files');
 const showCommits = computed(() => viewMode.value === 'commits');
@@ -54,6 +74,7 @@ const selectedArtifact = computed(() =>
 const selectedVersion = computed<ArtifactVersionModel | undefined>(() => selectedArtifact.value?.lastVersion);
 const hasMoreCommits = ref(false);
 const hasMore = computed(() => hasMoreCommits.value);
+const snapshotCommitHash = ref<string>();
 
 onMounted(async () => {
   await loadSources();
@@ -73,12 +94,13 @@ watch(filteredCommits, async (next) => {
   if (!next.length) {
     selectedArtifactId.value = undefined;
     fileArtifacts.value = [];
+    snapshotFiles.value = [];
     return;
   }
   const exists = next.some((artifact) => artifact.id === selectedArtifactId.value);
   if (!exists) {
     selectedArtifactId.value = next[0].id;
-    await loadFilesForCommit(next[0]);
+    await Promise.all([loadFilesForCommit(next[0]), loadSnapshotForCommit(next[0])]);
   }
 });
 
@@ -91,6 +113,7 @@ watch(selectedSourceId, async (next) => {
   } else {
     artifacts.value = [];
     fileArtifacts.value = [];
+    snapshotFiles.value = [];
     selectedArtifactId.value = undefined;
   }
 });
@@ -124,7 +147,7 @@ async function loadCommits(sourceId: string, append = false) {
     if (!append) {
       const nextCommit = filteredCommits.value[0];
       selectedArtifactId.value = nextCommit?.id;
-      await loadFilesForCommit(nextCommit);
+      await Promise.all([loadFilesForCommit(nextCommit), loadSnapshotForCommit(nextCommit)]);
     }
   } finally {
     loadingArtifacts.value = false;
@@ -151,6 +174,29 @@ async function loadFilesForCommit(artifact?: ArtifactModel) {
   }
 }
 
+async function loadSnapshotForCommit(artifact?: ArtifactModel) {
+  if (!artifact?.lastVersion || !selectedSourceId.value) {
+    snapshotFiles.value = [];
+    snapshotCommitHash.value = undefined;
+    return;
+  }
+  const commitHash =
+    (artifact.lastVersion.data as any)?.commitHash ?? artifact.lastVersion.version ?? artifact.displayName;
+  if (!commitHash) {
+    snapshotFiles.value = [];
+    snapshotCommitHash.value = undefined;
+    return;
+  }
+  snapshotCommitHash.value = commitHash;
+  loadingSnapshot.value = true;
+  try {
+    const response = await fetchGitCommitSnapshot(selectedSourceId.value, commitHash);
+    snapshotFiles.value = response.items;
+  } finally {
+    loadingSnapshot.value = false;
+  }
+}
+
 function refreshArtifacts() {
   if (selectedSourceId.value) {
     loadCommits(selectedSourceId.value);
@@ -166,8 +212,29 @@ function loadMore() {
 async function selectArtifact(id: string) {
   selectedArtifactId.value = id;
   const artifact = filteredCommits.value.find((item) => item.id === id);
-  await loadFilesForCommit(artifact);
+  await Promise.all([loadFilesForCommit(artifact), loadSnapshotForCommit(artifact)]);
   viewMode.value = 'files';
+}
+
+async function loadSnapshotFileContent(path: string): Promise<FileArtifactPayload | null> {
+  if (!selectedSourceId.value || !snapshotCommitHash.value) {
+    return null;
+  }
+  const response = await fetchGitCommitSnapshotFile(
+    selectedSourceId.value,
+    snapshotCommitHash.value,
+    path
+  );
+  return {
+    artifactId: `${snapshotCommitHash.value}:${path}`,
+    path: response.path,
+    commitHash: snapshotCommitHash.value,
+    blobSha: response.blobSha,
+    mode: response.mode,
+    size: response.size,
+    encoding: response.encoding,
+    content: response.content
+  };
 }
 
 function toggleCommits() {
@@ -215,6 +282,16 @@ function commitAuthor(artifact?: ArtifactModel) {
   return (version?.data as any)?.author ?? version?.metadata?.author ?? 'Unknown';
 }
 
+function commitTimestamp(artifact?: ArtifactModel) {
+  const version = artifact?.lastVersion;
+  return (
+    version?.timestamp ??
+    (version?.data as any)?.committerDate ??
+    (version?.data as any)?.authorDate ??
+    version?.createdAt
+  );
+}
+
 function shortHash(artifact?: ArtifactModel) {
   const version = artifact?.lastVersion;
   const hash: string | undefined = (version?.data as any)?.commitHash ?? version?.version;
@@ -251,21 +328,23 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
           {{ loadingSources ? 'Refreshing…' : 'Refresh' }}
         </button>
       </header>
-      <div v-if="loadingSources && !sources.length" class="placeholder">Loading sources…</div>
-      <ul v-else>
-        <li
-          v-for="source in sources"
-          :key="source.id"
-          :class="{ active: source.id === selectedSourceId }"
-          @click="selectedSourceId = source.id"
-        >
-          <p>{{ source.name }}</p>
-          <small>{{ source.options?.repoUrl ?? 'Unknown repo' }}</small>
-        </li>
-      </ul>
-      <p v-if="!sources.length && !loadingSources" class="placeholder">
-        No Git sources found. Create a source using the Git plugin to get started.
-      </p>
+      <div class="source-scroll">
+        <div v-if="loadingSources && !sources.length" class="placeholder">Loading sources…</div>
+        <ul v-else-if="sources.length">
+          <li
+            v-for="source in sources"
+            :key="source.id"
+            :class="{ active: source.id === selectedSourceId }"
+            @click="selectedSourceId = source.id"
+          >
+            <p>{{ source.name }}</p>
+            <small>{{ source.options?.repoUrl ?? 'Unknown repo' }}</small>
+          </li>
+        </ul>
+        <p v-else class="placeholder">
+          No Git sources found. Create a source using the Git plugin to get started.
+        </p>
+      </div>
     </aside>
 
     <section class="content">
@@ -319,42 +398,34 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
               <div v-else-if="!filteredCommits.length" class="placeholder">
                 {{ branchFilter ? 'No commits found for this branch.' : 'No commits found for this source.' }}
               </div>
-              <ul v-else>
-                <li
-                  v-for="artifact in filteredCommits"
-                  :key="artifact.id"
-                  :class="{ active: artifact.id === selectedArtifactId }"
-                  @click="selectArtifact(artifact.id)"
-                >
-                  <div class="details">
-                    <p class="message">{{ commitMessage(artifact) }}</p>
-                    <p class="meta">
-                      {{ commitAuthor(artifact) }} · {{ formatDate(artifact.lastVersion?.createdAt) }}
-                    </p>
-                    <div class="branches" v-if="commitBranchesForDisplay(artifact).length">
-                      <span v-for="branch in commitBranchesForDisplay(artifact)" :key="branch">{{ branch }}</span>
+              <template v-else>
+                <ul>
+                  <li
+                    v-for="artifact in filteredCommits"
+                    :key="artifact.id"
+                    :class="{ active: artifact.id === selectedArtifactId }"
+                    @click="selectArtifact(artifact.id)"
+                  >
+                    <div class="details">
+                      <p class="message">{{ commitMessage(artifact) }}</p>
+                      <p class="meta">
+                        {{ commitAuthor(artifact) }} · {{ formatDate(commitTimestamp(artifact)) }}
+                      </p>
+                      <div class="branches" v-if="commitBranchesForDisplay(artifact).length">
+                        <span v-for="branch in commitBranchesForDisplay(artifact)" :key="branch">{{ branch }}</span>
+                      </div>
                     </div>
-                  </div>
-                  <span class="hash">{{ shortHash(artifact) }}</span>
-                </li>
-              </ul>
-              <div v-if="hasMore" class="load-more">
-                <button type="button" class="ghost" @click="loadMore" :disabled="loadingArtifacts">
-                  {{ loadingArtifacts ? 'Loading…' : 'Load more' }}
-                </button>
-              </div>
+                    <span class="hash">{{ shortHash(artifact) }}</span>
+                  </li>
+                </ul>
+                <div v-if="hasMore" class="load-more">
+                  <button type="button" class="ghost" @click="loadMore" :disabled="loadingArtifacts">
+                    {{ loadingArtifacts ? 'Loading…' : 'Load more' }}
+                  </button>
+                </div>
+              </template>
             </div>
 
-            <div class="commit-detail">
-              <GitCommitViewer
-                v-if="selectedArtifact && selectedVersion"
-                :artifact="selectedArtifact"
-                :version="selectedVersion"
-                :files="fileArtifacts"
-                :files-loading="loadingFiles"
-              />
-              <p v-else class="placeholder">Select a commit to inspect its details.</p>
-            </div>
           </div>
 
           <div class="file-panel">
@@ -363,7 +434,7 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
                 <h4>{{ commitMessage(selectedArtifact) }}</h4>
                 <p class="meta">
                   {{ shortHash(selectedArtifact) }} · {{ commitAuthor(selectedArtifact) }} ·
-                  {{ formatDate(selectedArtifact.lastVersion?.createdAt) }}
+                  {{ formatDate(commitTimestamp(selectedArtifact)) }}
                 </p>
               </div>
               <GitCommitViewer
@@ -372,7 +443,9 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
                 :version="selectedVersion"
                 :files="fileArtifacts"
                 :files-loading="loadingFiles"
-                :show-changes="false"
+                :snapshot-files="snapshotFiles"
+                :snapshot-loading="loadingSnapshot"
+                :load-snapshot-file="loadSnapshotFileContent"
               />
               <p v-else-if="loadingArtifacts" class="placeholder">Loading repository files…</p>
               <p v-else class="placeholder">
@@ -393,6 +466,9 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
   display: grid;
   grid-template-columns: 280px 1fr;
   gap: 1rem;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 aside {
@@ -403,6 +479,17 @@ aside {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.source-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 aside ul {
@@ -445,6 +532,8 @@ aside small {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .content > header {
@@ -457,14 +546,17 @@ aside small {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  flex: 1;
+  min-height: 0;
 }
 
 .workspace {
   display: flex;
   gap: 0;
-  min-height: 400px;
-  align-items: flex-start;
+  align-items: stretch;
   overflow: hidden;
+  flex: 1;
+  min-height: 0;
 }
 
 .commit-panel {
@@ -476,6 +568,7 @@ aside small {
   flex-direction: column;
   gap: 0.75rem;
   overflow: hidden;
+  min-height: 0;
   pointer-events: none;
   margin-right: -320px;
   transform: translateX(-100%);
@@ -493,6 +586,9 @@ aside small {
   flex: 1 1 auto;
   margin-left: 0;
   transition: margin-left 0.3s ease;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .workspace.commits-visible .file-panel {
@@ -560,6 +656,9 @@ aside small {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .commit-list ul {
@@ -617,19 +716,16 @@ aside small {
   margin-top: 0.5rem;
 }
 
-.commit-detail {
-  border: 1px solid #e2e8f0;
-  border-radius: 0.75rem;
-  padding: 1rem;
-  background: #fff;
-  min-height: 400px;
-}
-
 .file-view {
   border: 1px solid #e2e8f0;
   border-radius: 0.75rem;
   padding: 1rem;
   background: #fff;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .file-view-header {

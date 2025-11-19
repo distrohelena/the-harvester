@@ -26,9 +26,12 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 1rem 2rem;
+  padding: 0 2rem;
   background: #111827;
   color: #fff;
+  height: 5vh;
+  min-height: 48px;
+  max-height: 5vh;
 }
 
 nav {
@@ -49,5 +52,12 @@ nav a.router-link-active {
 main {
   flex: 1;
   padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  height: 94.5vh;
+  max-height: 94.5vh;
+  box-sizing: border-box;
 }
 </style>

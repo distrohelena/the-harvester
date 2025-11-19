@@ -63,6 +63,25 @@ interface SnapshotEntry {
   buffer: Buffer;
 }
 
+interface SnapshotFileReference {
+  path: string;
+  mode?: string;
+  size?: number;
+  blobSha?: string;
+  externalId: string;
+  sourceCommitHash: string;
+}
+
+interface DiffTreeEntry {
+  oldMode: string;
+  newMode: string;
+  oldSha: string;
+  newSha: string;
+  status: string;
+  path: string;
+  newPath?: string;
+}
+
 @Injectable()
 export class GitPlugin implements Plugin {
   private readonly logger = new Logger(GitPlugin.name);
@@ -140,6 +159,10 @@ export class GitPlugin implements Plugin {
     const options = this.normalizeOptions(source.options as GitPluginOptions);
     const repoPath = await this.prepareRepository(options);
     const collected: NormalizedArtifact[] = [];
+    let totalCommitsProcessed = 0;
+    let totalChangesCaptured = 0;
+    let totalFileArtifactsCaptured = 0;
+    const snapshotState = new Map<string, SnapshotFileReference>();
     const emitBatch = async (batch: NormalizedArtifact[]) => {
       if (!batch.length) {
         return;
@@ -169,12 +192,17 @@ export class GitPlugin implements Plugin {
       for (const commitHash of commits) {
         const branches = Array.from(branchMap.get(commitHash) ?? []);
         const commitMetadata = await this.readCommitMetadata(repoPath, commitHash);
-        const changes = await this.readCommitChanges(repoPath, commitHash);
+        const changes = await this.readCommitChanges(
+          repoPath,
+          commitHash,
+          commitMetadata.parents.length
+        );
         const snapshotEntries = await this.readCommitSnapshot(repoPath, changes);
         const snapshotMap = new Map(snapshotEntries.map((entry) => [entry.path, entry]));
         const fileArtifacts = snapshotEntries.map((entry) =>
           this.buildFileArtifact(entry, commitHash, options, branches, commitMetadata)
         );
+        const snapshotReferences = this.updateSnapshotState(snapshotState, changes, fileArtifacts);
         changes.forEach((change) => {
           if (change.status === 'D') {
             return;
@@ -184,17 +212,49 @@ export class GitPlugin implements Plugin {
             change.size = snapshot.size;
           }
         });
+        const changeCount = changes.length;
+        const snapshotCount = snapshotEntries.length;
+        if (changeCount === 0) {
+          this.logger.warn(
+            `GitPlugin detected 0 file change(s) for commit ${commitHash} (${options.repoUrl}). Parents: ${commitMetadata.parents.length}.`
+          );
+        } else if (snapshotCount === 0) {
+          this.logger.warn(
+            `GitPlugin parsed ${changeCount} change(s) for commit ${commitHash} but captured 0 snapshot entries.`
+          );
+        } else {
+          this.logger.debug(
+            `GitPlugin commit ${commitHash.slice(0, 7)} has ${changeCount} change(s) and ${snapshotCount} snapshot file(s).`
+          );
+        }
         const commitArtifact = this.buildCommitArtifact(
           commitHash,
           options,
           branches,
           commitMetadata,
           fileArtifacts,
-          changes
+          changes,
+          snapshotReferences
+        );
+
+        const fileCount = fileArtifacts.length;
+        totalCommitsProcessed += 1;
+        totalChangesCaptured += changeCount;
+        totalFileArtifactsCaptured += fileCount;
+        if (fileCount === 0 && changeCount > 0) {
+          this.logger.warn(
+            `GitPlugin did not capture any file artifacts for commit ${commitHash} despite ${changeCount} detected change(s).`
+          );
+        }
+        this.logger.log(
+          `GitPlugin capturing commit ${commitHash.slice(0, 7)} (${options.repoUrl}) with ${changeCount} change(s) and ${fileCount} file artifact(s).`
         );
 
         await emitBatch([...fileArtifacts, commitArtifact]);
       }
+      this.logger.log(
+        `GitPlugin captured ${totalFileArtifactsCaptured} file artifact(s) across ${totalCommitsProcessed} commit(s) (${totalChangesCaptured} change entries) for ${options.repoUrl}.`
+      );
     } finally {
       await this.cleanupRepository(repoPath);
     }
@@ -210,7 +270,7 @@ export class GitPlugin implements Plugin {
   }
 
   private normalizeOptions(raw: GitPluginOptions): NormalizedGitOptions {
-    const repoUrl = raw?.repoUrl?.trim();
+    const repoUrl = this.normalizeRepoUrl(raw?.repoUrl);
     if (!repoUrl) {
       throw new BadRequestException('Git plugin requires repoUrl in source options');
     }
@@ -220,6 +280,14 @@ export class GitPlugin implements Plugin {
     const sshPrivateKey = this.normalizePrivateKey(raw?.sshPrivateKey);
     const repoSlug = this.slugify(repoUrl);
     return { repoUrl, primaryBranch, branchFilter, authToken, sshPrivateKey, repoSlug };
+  }
+
+  private normalizeRepoUrl(raw?: string | null): string {
+    const value = raw?.trim();
+    if (!value) {
+      return '';
+    }
+    return value.replace(/\/+$/, '');
   }
 
   private normalizeBranchList(value?: string | string[]): string[] {
@@ -393,7 +461,8 @@ export class GitPlugin implements Plugin {
     branches: string[],
     metadata: CommitMetadata,
     fileArtifacts: NormalizedArtifact[],
-    changes: CommitFileChange[]
+    changes: CommitFileChange[],
+    snapshotFiles: SnapshotFileReference[]
   ): NormalizedArtifact {
     const displayName = `${commitHash.slice(0, 7)} ${metadata.subject}`;
     const fileExternalIds = fileArtifacts.map((artifact) => artifact.externalId);
@@ -417,7 +486,8 @@ export class GitPlugin implements Plugin {
         message: metadata.message,
         fileArtifacts: fileExternalIds,
         changes,
-        snapshotSize: fileArtifacts.length
+        snapshotSize: snapshotFiles.length,
+        snapshotFiles
       },
       metadata: {
         repoUrl: options.repoUrl,
@@ -512,13 +582,47 @@ export class GitPlugin implements Plugin {
 
   private async readCommitChanges(
     repoPath: string,
-    commitHash: string
+    commitHash: string,
+    parentCount: number
   ): Promise<CommitFileChange[]> {
-    const diffOutput = await this.runGit(
-      ['diff-tree', '--root', '--find-renames', '--find-copies', '--always', '-z', commitHash],
-      { cwd: repoPath, encoding: 'buffer' }
-    );
-    const entries = this.parseDiffTree(diffOutput);
+    const diffTreeArgs = parentCount > 1 ? ['--cc'] : [];
+    let entries = await this.loadDiffEntries(repoPath, commitHash, diffTreeArgs);
+
+    if (!entries.length && parentCount > 0) {
+      entries = await this.loadDiffEntries(repoPath, commitHash);
+    }
+
+    let fallbackToShow = false;
+    if (!entries.length) {
+      fallbackToShow = true;
+      const showArgs = [
+        'show',
+        '--raw',
+        '--format=',
+        '--find-renames',
+        '--find-copies',
+        '--no-abbrev',
+        '-z'
+      ];
+      if (parentCount > 1) {
+        showArgs.push('-m');
+      }
+      showArgs.push(commitHash);
+      const showOutput = await this.runGit(showArgs, {
+        cwd: repoPath,
+        encoding: 'buffer'
+      });
+      entries = this.parseDiffTree(showOutput);
+    }
+
+    if (!entries.length) {
+      const reason = fallbackToShow
+        ? 'git diff-tree and git show --raw returned no entries'
+        : 'git diff-tree returned no entries';
+      this.logger.warn(`GitPlugin could not determine file changes for commit ${commitHash}: ${reason}.`);
+      return [];
+    }
+
     const files: CommitFileChange[] = [];
     for (const entry of entries) {
       const status = entry.status as ChangeStatus;
@@ -539,26 +643,40 @@ export class GitPlugin implements Plugin {
     return files;
   }
 
-  private parseDiffTree(buffer: Buffer): Array<{
-    oldMode: string;
-    newMode: string;
-    oldSha: string;
-    newSha: string;
-    status: string;
-    path: string;
-    newPath?: string;
-  }> {
+  private async loadDiffEntries(
+    repoPath: string,
+    target: string,
+    extraArgs: string[] = []
+  ): Promise<DiffTreeEntry[]> {
+    const diffOutput = await this.runGit(
+      [
+        'diff-tree',
+        ...extraArgs,
+        '-r',
+        '--root',
+        '--find-renames',
+        '--find-copies',
+        '--always',
+        '--no-abbrev',
+        '-z',
+        target
+      ],
+      { cwd: repoPath, encoding: 'buffer' }
+    );
+    return this.parseDiffTree(diffOutput);
+  }
+
+  private parseDiffTree(buffer: Buffer): DiffTreeEntry[] {
     const text = buffer.toString('utf8');
-    const segments = text.split('\0').filter((segment) => segment.length > 0);
-    const entries: Array<{
-      oldMode: string;
-      newMode: string;
-      oldSha: string;
-      newSha: string;
-      status: string;
-      path: string;
-      newPath?: string;
-    }> = [];
+    const segments = text.split('\0').filter((segment, index, source) => {
+      // Keep empty trailing segment to preserve indexing for rename new paths
+      if (segment.length > 0) {
+        return true;
+      }
+      const next = source[index + 1];
+      return typeof next === 'string' && next.startsWith(':');
+    });
+    const entries: DiffTreeEntry[] = [];
 
     for (let index = 0; index < segments.length; index += 1) {
       const segment = segments[index];
@@ -566,16 +684,21 @@ export class GitPlugin implements Plugin {
         continue;
       }
       const match = segment.match(
-        /^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) ([A-Z])(\d{0,3})?\t(.*)$/
+        /^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) ([A-Z])(\d{0,3})?$/
       );
       if (!match) {
         continue;
       }
-      const [, oldMode, newMode, oldSha, newSha, statusLetter,, pathValue] = match;
+      const [, oldMode, newMode, oldSha, newSha, statusLetter] = match;
+      const pathValue = segments[index + 1];
+      if (typeof pathValue !== 'string' || pathValue.startsWith(':')) {
+        continue;
+      }
+      index += 1;
       let newPath: string | undefined;
-      if ((statusLetter === 'R' || statusLetter === 'C') && index + 1 < segments.length) {
+      if (statusLetter === 'R' || statusLetter === 'C') {
         const candidate = segments[index + 1];
-        if (!candidate.startsWith(':')) {
+        if (typeof candidate === 'string' && !candidate.startsWith(':')) {
           newPath = candidate;
           index += 1;
         }
@@ -645,6 +768,48 @@ export class GitPlugin implements Plugin {
     return `${repoSlug}:file:${commitHash}:${hash}`;
   }
 
+  private updateSnapshotState(
+    state: Map<string, SnapshotFileReference>,
+    changes: CommitFileChange[],
+    fileArtifacts: NormalizedArtifact[]
+  ): SnapshotFileReference[] {
+    const artifactByPath = new Map<string, NormalizedArtifact>();
+    fileArtifacts.forEach((artifact) => {
+      const artifactPath: string | undefined = (artifact.data as any)?.path;
+      if (artifactPath) {
+        artifactByPath.set(artifactPath, artifact);
+      }
+    });
+
+    for (const change of changes) {
+      if (change.status === 'D') {
+        state.delete(change.path);
+        continue;
+      }
+      if ((change.status === 'R' || change.status === 'C') && change.previousPath) {
+        state.delete(change.previousPath);
+      }
+      const artifact = artifactByPath.get(change.path);
+      if (artifact) {
+        state.set(change.path, this.buildSnapshotReference(artifact));
+      }
+    }
+
+    return Array.from(state.values()).map((entry) => ({ ...entry }));
+  }
+
+  private buildSnapshotReference(artifact: NormalizedArtifact): SnapshotFileReference {
+    const data = artifact.data as any;
+    return {
+      path: data.path,
+      mode: data.mode,
+      size: data.size,
+      blobSha: data.blobSha,
+      externalId: artifact.externalId,
+      sourceCommitHash: data.commitHash
+    };
+  }
+
   private isLikelyText(buffer: Buffer): boolean {
     const sample = buffer.slice(0, 4096);
     for (let index = 0; index < sample.length; index += 1) {
@@ -673,6 +838,7 @@ export class GitPlugin implements Plugin {
     if (sshMatch) {
       target = `https://${sshMatch[1]}/${sshMatch[2]}`.replace(/\/+$/, '');
     }
+    target = target.replace(/\/+$/, '');
     if (!authToken) {
       return target;
     }
@@ -682,7 +848,7 @@ export class GitPlugin implements Plugin {
         parsed.username = 'token';
       }
       parsed.password = authToken;
-      return parsed.toString();
+      return parsed.toString().replace(/\/+$/, '');
     } catch {
       return target;
     }

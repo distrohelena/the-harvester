@@ -31,10 +31,10 @@ interface GitCommitData {
 }
 
 interface FileArtifactData {
-  artifactId: string;
+  artifactId?: string;
   path: string;
-  commitHash: string;
-  blobSha: string;
+  commitHash?: string;
+  blobSha?: string;
   mode?: string;
   size?: number;
   encoding?: 'utf8' | 'base64';
@@ -42,12 +42,24 @@ interface FileArtifactData {
   branches?: string[];
 }
 
+interface SnapshotTreeEntry {
+  path: string;
+  mode?: string;
+  size?: number;
+  blobSha?: string;
+}
+
+type LoadSnapshotFileFn = (path: string) => Promise<FileArtifactData | null>;
+
 const props = defineProps<{
   artifact: ArtifactModel;
   version: ArtifactVersionModel;
   files: ArtifactModel[];
   filesLoading?: boolean;
   showChanges?: boolean;
+  snapshotFiles?: SnapshotTreeEntry[];
+  snapshotLoading?: boolean;
+  loadSnapshotFile?: LoadSnapshotFileFn;
 }>();
 
 const commitData = computed<GitCommitData>(() => (props.version?.data ?? {}) as GitCommitData);
@@ -55,8 +67,9 @@ const changeList = computed<GitCommitChange[]>(() =>
   Array.isArray(commitData.value.changes) ? commitData.value.changes : []
 );
 const filesLoading = computed(() => Boolean(props.filesLoading));
+const snapshotLoading = computed(() => Boolean(props.snapshotLoading));
 
-const fileEntries = computed<FileArtifactData[]>(() =>
+const changedFileEntries = computed<FileArtifactData[]>(() =>
   (props.files ?? [])
     .map((artifact) => {
       const data = (artifact.lastVersion?.data ?? {}) as any;
@@ -77,6 +90,8 @@ const fileEntries = computed<FileArtifactData[]>(() =>
     })
     .filter((entry): entry is FileArtifactData => Boolean(entry?.path))
 );
+
+const snapshotEntries = computed<SnapshotTreeEntry[]>(() => props.snapshotFiles ?? []);
 
 const repoLink = computed(() => normalizeRepoUrl(props.artifact.source?.options?.repoUrl));
 const commitHash = computed(() => commitData.value.commitHash ?? props.version.version);
@@ -173,49 +188,118 @@ type TreeNode = {
   fileCount?: number;
 };
 
-const treeNodes = computed<TreeNode[]>(() => buildTree(fileEntries.value));
-const fileMap = computed<Map<string, FileArtifactData>>(() => {
+const changedTreeNodes = computed<TreeNode[]>(() => buildTree(changedFileEntries.value));
+const changedFileMap = computed<Map<string, FileArtifactData>>(() => {
   const map = new Map<string, FileArtifactData>();
-  fileEntries.value.forEach((entry) => {
+  changedFileEntries.value.forEach((entry) => {
     map.set(entry.path, entry);
   });
   return map;
 });
 
-const directoryCount = computed(() => countDirectories(treeNodes.value));
+const snapshotTreeNodes = computed<TreeNode[]>(() => buildTree(snapshotEntries.value));
+const changedDirectoryCount = computed(() => countDirectories(changedTreeNodes.value));
+const snapshotDirectoryCount = computed(() => countDirectories(snapshotTreeNodes.value));
 
-const expandedPaths = ref<Set<string>>(new Set());
-const selectedPath = ref<string>();
+const changedExpandedPaths = ref<Set<string>>(new Set());
+const changedSelectedPath = ref<string>();
+const snapshotExpandedPaths = ref<Set<string>>(new Set());
+const snapshotSelectedPath = ref<string>();
+const snapshotFileCache = ref<Map<string, FileArtifactData>>(new Map());
+const snapshotLoadingFile = ref(false);
+const snapshotSelectedFile = ref<FileArtifactData>();
+
 watch(
-  () => fileEntries.value,
+  () => changedFileEntries.value,
   (list) => {
-    expandedPaths.value = new Set();
-    selectedPath.value = list[0]?.path;
-    if (selectedPath.value) {
-      expandPathAncestors(selectedPath.value);
+    changedExpandedPaths.value = new Set();
+    changedSelectedPath.value = list[0]?.path;
+    if (changedSelectedPath.value) {
+      changedExpandedPaths.value = expandAncestors(changedSelectedPath.value, changedExpandedPaths.value);
     }
   },
   { immediate: true }
 );
 
-const selectedFile = computed(() => (selectedPath.value ? fileMap.value.get(selectedPath.value) : undefined));
+watch(
+  () => snapshotEntries.value,
+  (list) => {
+    snapshotFileCache.value = new Map();
+    snapshotSelectedFile.value = undefined;
+    snapshotExpandedPaths.value = new Set();
+    snapshotSelectedPath.value = list[0]?.path;
+    if (snapshotSelectedPath.value) {
+      snapshotExpandedPaths.value = expandAncestors(
+        snapshotSelectedPath.value,
+        snapshotExpandedPaths.value
+      );
+      void loadSnapshotFileContent(snapshotSelectedPath.value);
+    }
+  },
+  { immediate: true }
+);
 
-function selectPath(path: string) {
-  expandPathAncestors(path);
-  selectedPath.value = path;
+const changedSelectedFile = computed(() =>
+  changedSelectedPath.value ? changedFileMap.value.get(changedSelectedPath.value) : undefined
+);
+
+async function loadSnapshotFileContent(path: string) {
+  if (!props.loadSnapshotFile) {
+    snapshotSelectedFile.value = undefined;
+    return;
+  }
+  if (!path) {
+    snapshotSelectedFile.value = undefined;
+    return;
+  }
+  const cached = snapshotFileCache.value.get(path);
+  if (cached) {
+    if (snapshotSelectedPath.value === path) {
+      snapshotSelectedFile.value = cached;
+    }
+    return;
+  }
+  snapshotLoadingFile.value = true;
+  try {
+    const file = await props
+      .loadSnapshotFile(path)
+      .catch((error) => {
+        console.error('Unable to load repository file', error);
+        return null;
+      });
+    if (file) {
+      snapshotFileCache.value.set(path, file);
+      if (snapshotSelectedPath.value === path) {
+        snapshotSelectedFile.value = file;
+      }
+    } else if (snapshotSelectedPath.value === path) {
+      snapshotSelectedFile.value = undefined;
+    }
+  } finally {
+    snapshotLoadingFile.value = false;
+  }
 }
 
-const toggleDirectory = (path: string) => {
-  const next = new Set(expandedPaths.value);
-  if (next.has(path)) {
-    next.delete(path);
-  } else {
-    next.add(path);
-  }
-  expandedPaths.value = next;
+function selectChangedPath(path: string) {
+  changedExpandedPaths.value = expandAncestors(path, changedExpandedPaths.value);
+  changedSelectedPath.value = path;
+}
+
+const selectSnapshotPath = async (path: string) => {
+  snapshotExpandedPaths.value = expandAncestors(path, snapshotExpandedPaths.value);
+  snapshotSelectedPath.value = path;
+  await loadSnapshotFileContent(path);
 };
 
-function downloadFile(file: FileArtifactData | undefined) {
+const toggleChangedDirectory = (path: string) => {
+  changedExpandedPaths.value = togglePathExpansion(path, changedExpandedPaths.value);
+};
+
+const toggleSnapshotDirectory = (path: string) => {
+  snapshotExpandedPaths.value = togglePathExpansion(path, snapshotExpandedPaths.value);
+};
+
+function downloadArtifactFile(file: FileArtifactData | undefined) {
   if (!file?.content) return;
   try {
     const filename = file.path.split('/').pop() || 'file';
@@ -243,7 +327,11 @@ function downloadFile(file: FileArtifactData | undefined) {
   }
 }
 
-const filePreview = computed(() => buildPreview(selectedFile.value));
+const downloadChangedFile = () => downloadArtifactFile(changedSelectedFile.value);
+const downloadSnapshotFile = () => downloadArtifactFile(snapshotSelectedFile.value);
+
+const changedFilePreview = computed(() => buildPreview(changedSelectedFile.value));
+const snapshotFilePreview = computed(() => buildPreview(snapshotSelectedFile.value));
 
 const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico', 'avif'];
 
@@ -535,8 +623,8 @@ function buildPreview(file?: FileArtifactData): FilePreview {
   return { text, truncated, binary: false };
 }
 
-function expandPathAncestors(path: string) {
-  const next = new Set(expandedPaths.value);
+function expandAncestors(path: string, existing: Set<string>): Set<string> {
+  const next = new Set(existing);
   const segments = path.split('/');
   if (segments.length > 1) {
     let current = '';
@@ -545,28 +633,46 @@ function expandPathAncestors(path: string) {
       next.add(current);
     });
   }
-  expandedPaths.value = next;
+  return next;
 }
 
-function collectDirectoryPaths(nodes: TreeNode[], target: Set<string>) {
-  nodes.forEach((node) => {
-    if (node.type === 'directory') {
-      target.add(node.path);
-      if (node.children?.length) {
-        collectDirectoryPaths(node.children, target);
-      }
-    }
-  });
+function collectDirectoryPathsRecursive(node: TreeNode, target: Set<string>) {
+  if (node.type === 'directory') {
+    target.add(node.path);
+    node.children?.forEach((child) => collectDirectoryPathsRecursive(child, target));
+  }
 }
 
-function expandAllDirectories() {
-  const next = new Set<string>();
-  collectDirectoryPaths(treeNodes.value, next);
-  expandedPaths.value = next;
+function collectAllDirectoryPaths(nodes: TreeNode[]): Set<string> {
+  const target = new Set<string>();
+  nodes.forEach((node) => collectDirectoryPathsRecursive(node, target));
+  return target;
 }
 
-function collapseAllDirectories() {
-  expandedPaths.value = new Set();
+function togglePathExpansion(path: string, current: Set<string>): Set<string> {
+  const next = new Set(current);
+  if (next.has(path)) {
+    next.delete(path);
+  } else {
+    next.add(path);
+  }
+  return next;
+}
+
+function expandAllChangedDirectories() {
+  changedExpandedPaths.value = collectAllDirectoryPaths(changedTreeNodes.value);
+}
+
+function collapseAllChangedDirectories() {
+  changedExpandedPaths.value = new Set();
+}
+
+function expandAllSnapshotDirectories() {
+  snapshotExpandedPaths.value = collectAllDirectoryPaths(snapshotTreeNodes.value);
+}
+
+function collapseAllSnapshotDirectories() {
+  snapshotExpandedPaths.value = new Set();
 }
 </script>
 
@@ -664,53 +770,61 @@ function collapseAllDirectories() {
     </section>
 
     <section class="repository">
-      <h4>Repository Files ({{ fileEntries.length }})</h4>
-      <p v-if="filesLoading" class="placeholder">Loading repository files…</p>
-      <div class="repo-browser" v-else-if="fileEntries.length">
+      <h4>Changed Files Browser ({{ changedFileEntries.length }})</h4>
+      <p v-if="filesLoading" class="placeholder">Loading changed files…</p>
+      <div class="repo-browser" v-else-if="changedFileEntries.length">
         <div class="tree-panel">
           <div class="tree-toolbar">
             <div>
-              <p class="label subtle">Repository tree</p>
-              <p class="meta">{{ directoryCount }} folders · {{ fileEntries.length }} files</p>
+              <p class="label subtle">Changed files tree</p>
+              <p class="meta">{{ changedDirectoryCount }} folders · {{ changedFileEntries.length }} files</p>
             </div>
             <div class="tree-actions">
-              <button type="button" class="ghost-button" @click="expandAllDirectories">Expand all</button>
-              <button type="button" class="ghost-button" @click="collapseAllDirectories">Collapse all</button>
+              <button type="button" class="ghost-button" @click="expandAllChangedDirectories">Expand all</button>
+              <button type="button" class="ghost-button" @click="collapseAllChangedDirectories">Collapse all</button>
             </div>
           </div>
           <div class="tree">
             <ul>
               <TreeBranch
-                v-for="node in treeNodes"
+                v-for="node in changedTreeNodes"
                 :key="node.path"
                 :node="node"
-                :selected-path="selectedPath"
-                :expanded-paths="expandedPaths"
-                @select="selectPath"
-                @toggle="toggleDirectory"
+                :selected-path="changedSelectedPath"
+                :expanded-paths="changedExpandedPaths"
+                @select="selectChangedPath"
+                @toggle="toggleChangedDirectory"
               />
             </ul>
           </div>
         </div>
         <div class="preview">
-          <template v-if="selectedFile">
+          <template v-if="changedSelectedFile">
             <header>
               <div>
-                <h5>{{ selectedFile.path }}</h5>
-                <p>{{ formatBytes(selectedFile.size) }} · {{ selectedFile.mode }}</p>
+                <h5>{{ changedSelectedFile.path }}</h5>
+                <p>
+                  {{ formatBytes(changedSelectedFile.size) }}
+                  <span v-if="changedSelectedFile.mode">· {{ changedSelectedFile.mode }}</span>
+                </p>
               </div>
-              <button class="ghost-button" type="button" @click="downloadFile(selectedFile)">
+              <button
+                class="ghost-button"
+                type="button"
+                @click="downloadChangedFile"
+                :disabled="!changedSelectedFile?.content"
+              >
                 Download
               </button>
             </header>
-            <template v-if="filePreview.imageUrl">
+            <template v-if="changedFilePreview.imageUrl">
               <div class="image-preview">
-                <img :src="filePreview.imageUrl" :alt="selectedFile.path" />
+                <img :src="changedFilePreview.imageUrl" :alt="changedSelectedFile.path" />
               </div>
             </template>
-            <div v-else-if="!filePreview.binary">
-              <pre>{{ filePreview.text }}</pre>
-              <p v-if="filePreview.truncated" class="hint">
+            <div v-else-if="changedSelectedFile.content && !changedFilePreview.binary">
+              <pre>{{ changedFilePreview.text }}</pre>
+              <p v-if="changedFilePreview.truncated" class="hint">
                 Preview truncated for large files. Download to view full content.
               </p>
             </div>
@@ -721,7 +835,85 @@ function collapseAllDirectories() {
           </div>
         </div>
       </div>
-      <p v-else class="placeholder">No files available for this commit.</p>
+      <p v-else class="placeholder">No changed files were captured for this commit.</p>
+    </section>
+
+    <section class="repository">
+      <h4>Repository Files ({{ snapshotEntries.length }})</h4>
+      <p v-if="snapshotLoading" class="placeholder">Loading repository files…</p>
+      <div class="repo-browser" v-else-if="snapshotEntries.length">
+        <div class="tree-panel">
+          <div class="tree-toolbar">
+            <div>
+              <p class="label subtle">Full repository tree</p>
+              <p class="meta">{{ snapshotDirectoryCount }} folders · {{ snapshotEntries.length }} files</p>
+            </div>
+            <div class="tree-actions">
+              <button type="button" class="ghost-button" @click="expandAllSnapshotDirectories">Expand all</button>
+              <button type="button" class="ghost-button" @click="collapseAllSnapshotDirectories">Collapse all</button>
+            </div>
+          </div>
+          <div class="tree">
+            <ul>
+              <TreeBranch
+                v-for="node in snapshotTreeNodes"
+                :key="node.path"
+                :node="node"
+                :selected-path="snapshotSelectedPath"
+                :expanded-paths="snapshotExpandedPaths"
+                @select="selectSnapshotPath"
+                @toggle="toggleSnapshotDirectory"
+              />
+            </ul>
+          </div>
+        </div>
+        <div class="preview">
+          <template v-if="snapshotSelectedPath">
+            <header>
+              <div>
+                <h5>{{ snapshotSelectedPath }}</h5>
+                <p>
+                  {{ formatBytes(snapshotSelectedFile?.size) }}
+                  <span v-if="snapshotSelectedFile?.mode">· {{ snapshotSelectedFile.mode }}</span>
+                </p>
+              </div>
+              <button
+                class="ghost-button"
+                type="button"
+                @click="downloadSnapshotFile"
+                :disabled="snapshotLoadingFile || !snapshotSelectedFile?.content"
+              >
+                Download
+              </button>
+            </header>
+            <p v-if="snapshotLoadingFile && !snapshotSelectedFile" class="placeholder">Loading file…</p>
+            <template v-else-if="snapshotSelectedFile">
+              <template v-if="snapshotFilePreview.imageUrl">
+                <div class="image-preview">
+                  <img :src="snapshotFilePreview.imageUrl" :alt="snapshotSelectedFile.path" />
+                </div>
+              </template>
+              <div v-else-if="snapshotSelectedFile.content && !snapshotFilePreview.binary">
+                <pre>{{ snapshotFilePreview.text }}</pre>
+                <p v-if="snapshotFilePreview.truncated" class="hint">
+                  Preview truncated for large files. Download to view full content.
+                </p>
+              </div>
+              <p v-else class="placeholder">
+                {{
+                  snapshotSelectedFile.content
+                    ? 'Binary file preview not available.'
+                    : 'Select a file to load its contents.'
+                }}
+              </p>
+            </template>
+          </template>
+          <div v-else class="preview-empty">
+            <p class="placeholder">Select a file from the tree to view its contents.</p>
+          </div>
+        </div>
+      </div>
+      <p v-else class="placeholder">No files available for this commit snapshot.</p>
     </section>
   </div>
 </template>
