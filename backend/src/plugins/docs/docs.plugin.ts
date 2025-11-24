@@ -678,7 +678,15 @@ export class DocsPlugin implements Plugin {
   }
 
   private isVersionSegment(segment: string): boolean {
-    return /^v?\d+(?:\.\d+){0,3}$/.test(segment) || ['latest', 'stable', 'next'].includes(segment.toLowerCase());
+    return this.isSemanticVersionSegment(segment) || this.isVersionAlias(segment);
+  }
+
+  private isSemanticVersionSegment(segment: string): boolean {
+    return /^v?\d+(?:\.\d+){0,3}$/.test(segment);
+  }
+
+  private isVersionAlias(segment: string): boolean {
+    return ['latest', 'stable', 'next'].includes(segment.toLowerCase());
   }
 
   private formatVersionLabel(segment: string): string {
@@ -817,12 +825,11 @@ export class DocsPlugin implements Plugin {
       versionRoot: version.rootUrl,
       versionBasePath: this.getVersionBasePath(version)
     };
+    const urlVersion = this.extractVersionFromUrl(url) ?? this.extractVersionFromUrl(version.rootUrl);
     const packageVersion = this.detectPackageVersion($, title, version.label);
-    if (packageVersion) {
-      metadata.packageVersion = packageVersion;
-    }
     const descriptorVersion = version.label?.toLowerCase() === 'latest' ? undefined : version.label;
-    const resolvedVersion = packageVersion ?? descriptorVersion ?? 'unknown';
+    const resolvedVersion = urlVersion ?? packageVersion ?? descriptorVersion ?? 'unknown';
+    metadata.packageVersion = resolvedVersion;
 
     const artifactPayload: NormalizedArtifact = {
       externalId: this.buildExternalId(version.key, path),
@@ -831,7 +838,7 @@ export class DocsPlugin implements Plugin {
       data: {
         path,
         version: resolvedVersion,
-        packageVersion: packageVersion ?? descriptorVersion ?? 'unknown',
+        packageVersion: resolvedVersion,
         title,
         html,
         text,
@@ -1370,6 +1377,34 @@ export class DocsPlugin implements Plugin {
     });
 
     return candidates[0]?.value;
+  }
+
+  private extractVersionFromUrl(url: string | undefined): string | undefined {
+    if (!url) {
+      return undefined;
+    }
+    try {
+      const parsed = new URL(url);
+      const pathname = parsed.pathname || '/';
+      const segments = pathname.split('/').filter(Boolean);
+      let fallback: string | undefined;
+      for (const segment of segments) {
+        if (this.isSemanticVersionSegment(segment)) {
+          return this.formatVersionLabel(segment);
+        }
+        const fromText = this.extractVersionFromText(segment);
+        if (fromText) {
+          return fromText;
+        }
+        if (!fallback && this.isVersionAlias(segment)) {
+          fallback = this.formatVersionLabel(segment);
+        }
+      }
+      const fromPath = this.extractVersionFromText(pathname);
+      return fromPath ?? fallback ?? undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private readVersionAttribute(node: cheerio.Cheerio<AnyNode>): string | undefined {
