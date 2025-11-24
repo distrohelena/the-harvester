@@ -356,9 +356,11 @@ export class JiraPlugin implements Plugin {
     let hasMore = true;
 
     while (hasMore && (maxIssues === undefined || aggregated.length < maxIssues)) {
+      // Escape user-provided project keys so Jira does not reject queries that contain backslashes or quotes.
+      const safeProjectKey = this.escapeJqlLiteral(projectKey);
       const page = await this.searchIssues(
         options,
-        `project = "${projectKey}" ORDER BY updated DESC`,
+        `project = "${safeProjectKey}" ORDER BY updated DESC`,
         startAt,
         pageSize,
         nextPageToken
@@ -931,5 +933,14 @@ export class JiraPlugin implements Plugin {
       return Number.isNaN(parsed) ? undefined : parsed;
     }
     return undefined;
+  }
+
+  /**
+   * Escape Jira string literals so control characters (quotes, backslashes) do not break JQL parsing.
+   * This protects against errors like "Unsupported Unicode escape sequence" when project keys include '\' characters.
+   */
+  private escapeJqlLiteral(input: string): string {
+    const normalized = String(input ?? '');
+    return normalized.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 }

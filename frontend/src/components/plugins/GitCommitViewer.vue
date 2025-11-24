@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, PropType, ref, watch } from 'vue';
 import type { ArtifactModel, ArtifactVersionModel } from '../../types/plugins';
+import { fetchArtifacts } from '../../api/artifacts';
 
 type ChangeStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U';
 
@@ -54,6 +55,25 @@ interface SnapshotTreeEntry {
 }
 
 type LoadSnapshotFileFn = (path: string) => Promise<FileArtifactData | null>;
+
+interface JiraIssueData {
+  key?: string;
+  summary?: string;
+  status?: string;
+  issueType?: string;
+  priority?: string;
+  assignee?: { displayName?: string };
+  project?: { key?: string; name?: string };
+  url?: string;
+  updatedAt?: string;
+}
+
+interface JiraIssueMetadata {
+  issueKey?: string;
+  projectKey?: string;
+  projectName?: string;
+  status?: string;
+}
 
 const props = defineProps<{
   artifact: ArtifactModel;
@@ -128,6 +148,18 @@ const branches = computed(() => commitData.value.branches ?? []);
 const parents = computed(() => commitData.value.parents ?? []);
 const message = computed(() => commitData.value.message ?? '');
 const displayChanges = computed(() => props.showChanges !== false);
+
+const linkedJiraIssue = ref<ArtifactModel | null>(null);
+const loadingJiraIssue = ref(false);
+const jiraIssueError = ref<string>();
+let latestJiraRequestId = 0;
+
+// Parse KEY-1234: prefixes so we can surface a linked Jira ticket inline with the commit.
+const jiraIssueKey = computed(() => parseJiraKeyFromMessage(message.value));
+const linkedJiraData = computed<JiraIssueData>(() => (linkedJiraIssue.value?.lastVersion?.data ?? {}) as JiraIssueData);
+const linkedJiraMetadata = computed<JiraIssueMetadata>(
+  () => (linkedJiraIssue.value?.lastVersion?.metadata ?? {}) as JiraIssueMetadata
+);
 
 const author = computed(() => ({
   name: commitData.value.author ?? 'Unknown',
@@ -208,6 +240,72 @@ function normalizeRepoUrl(value?: string) {
   }
   return trimmed;
 }
+
+function parseJiraKeyFromMessage(raw?: string): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const firstLine = raw.split('\n')[0] ?? '';
+  const match = firstLine.trim().match(/^([A-Z][A-Z0-9]+-\d+):/i);
+  return match?.[1]?.toUpperCase();
+}
+
+function jiraProjectLabel(data?: JiraIssueData, metadata?: JiraIssueMetadata) {
+  const projectKey = data?.project?.key ?? metadata?.projectKey;
+  const projectName = data?.project?.name ?? metadata?.projectName;
+  if (!projectKey && !projectName) return 'Unknown project';
+  if (!projectKey) return projectName ?? 'Unknown project';
+  return projectName ? `${projectKey} – ${projectName}` : projectKey;
+}
+
+async function loadLinkedJiraIssue(key?: string) {
+  const requestId = ++latestJiraRequestId;
+  jiraIssueError.value = undefined;
+  if (!key) {
+    linkedJiraIssue.value = null;
+    loadingJiraIssue.value = false;
+    return;
+  }
+  loadingJiraIssue.value = true;
+  try {
+    const response = await fetchArtifacts({ pluginKey: 'jira', search: key, limit: 10 });
+    if (requestId !== latestJiraRequestId) {
+      return;
+    }
+    const normalizedKey = key.toUpperCase();
+    const match =
+      response.items.find((item) => {
+        const data = (item.lastVersion?.data ?? {}) as JiraIssueData;
+        const metadata = (item.lastVersion?.metadata ?? {}) as JiraIssueMetadata;
+        const candidate = metadata.issueKey ?? data.key ?? item.displayName;
+        const normalizedCandidate =
+          typeof candidate === 'string' ? candidate.toUpperCase() : '';
+        return (
+          normalizedCandidate === normalizedKey ||
+          normalizedCandidate.startsWith(`${normalizedKey}:`)
+        );
+      }) ?? null;
+    linkedJiraIssue.value = match;
+  } catch (error: any) {
+    if (requestId !== latestJiraRequestId) {
+      return;
+    }
+    jiraIssueError.value = error?.message ?? 'Failed to load linked Jira issue';
+    linkedJiraIssue.value = null;
+  } finally {
+    if (requestId === latestJiraRequestId) {
+      loadingJiraIssue.value = false;
+    }
+  }
+}
+
+watch(
+  jiraIssueKey,
+  (key) => {
+    void loadLinkedJiraIssue(key);
+  },
+  { immediate: true }
+);
 
 type TreeNode = {
   name: string;
@@ -877,6 +975,39 @@ function collapseAllSnapshotDirectories() {
 
 <template>
   <div class="git-commit-viewer">
+    <section v-if="jiraIssueKey" class="linked-jira">
+      <div class="linked-jira__header">
+        <div>
+          <p class="label">Linked Jira ticket</p>
+          <p class="value mono">{{ jiraIssueKey }}</p>
+        </div>
+        <p v-if="linkedJiraData.url" class="jira-link">
+          <a :href="linkedJiraData.url" target="_blank" rel="noopener noreferrer">Open in Jira ↗</a>
+        </p>
+      </div>
+      <p v-if="loadingJiraIssue" class="placeholder">Looking up Jira issue…</p>
+      <div v-else-if="linkedJiraIssue" class="linked-jira__body">
+        <div>
+          <p class="issue-key">{{ linkedJiraData.key ?? jiraIssueKey }}</p>
+          <h4>{{ linkedJiraData.summary ?? linkedJiraIssue.displayName }}</h4>
+          <p class="project">{{ jiraProjectLabel(linkedJiraData, linkedJiraMetadata) }}</p>
+        </div>
+        <div class="linked-jira__badges">
+          <span class="jira-badge primary">
+            {{ linkedJiraData.status ?? linkedJiraMetadata.status ?? 'Unknown' }}
+          </span>
+          <span class="jira-badge">{{ linkedJiraData.priority ?? 'Unprioritized' }}</span>
+          <span class="jira-badge">{{ linkedJiraData.issueType ?? 'Issue' }}</span>
+        </div>
+        <div class="linked-jira__meta">
+          <span>Assignee: {{ linkedJiraData.assignee?.displayName ?? 'Unassigned' }}</span>
+          <span>Updated: {{ formatDate(linkedJiraData.updatedAt) }}</span>
+        </div>
+      </div>
+      <p v-else-if="jiraIssueError" class="placeholder">{{ jiraIssueError }}</p>
+      <p v-else class="placeholder">No stored Jira issue found for {{ jiraIssueKey }}.</p>
+    </section>
+
     <section class="summary">
       <div>
         <p class="label">Commit</p>
@@ -1223,6 +1354,67 @@ function collapseAllSnapshotDirectories() {
   font-size: 0.85rem;
   color: #475569;
   margin-top: 0.125rem;
+}
+
+.linked-jira {
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.linked-jira__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.linked-jira__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.linked-jira__badges {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.linked-jira__meta {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+  color: #475569;
+}
+
+.jira-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: #e5e7eb;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.jira-badge.primary {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.jira-link {
+  margin: 0;
+  font-weight: 600;
+}
+
+.jira-link a {
+  color: #2563eb;
+  text-decoration: none;
 }
 
 .message,
