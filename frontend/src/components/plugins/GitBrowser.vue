@@ -41,6 +41,7 @@ const loadingSnapshot = ref(false);
 const pagination = ref({ page: 1, limit: 25, total: 0 });
 const viewMode = ref<'files' | 'commits'>('files');
 const showCommits = computed(() => viewMode.value === 'commits');
+const ALL_BRANCHES_KEY = '__all__'; // Sentinel used by the “All branches” button so clearing the filter survives auto-selection logic.
 const branchFilter = ref<string | undefined>(undefined);
 const showBranchPanel = ref(false);
 const branchSearch = ref('');
@@ -84,17 +85,20 @@ const visibleBranches = computed(() => {
   return filtered.sort((a, b) => a.localeCompare(b));
 });
 const filteredCommits = computed(() => {
-  if (!branchFilter.value) {
+  if (!branchFilter.value || branchFilter.value === ALL_BRANCHES_KEY) {
     return allCommits.value;
   }
   return allCommits.value.filter((artifact) => commitBranches(artifact).includes(branchFilter.value as string));
 });
 const branchButtonLabel = computed(() => {
-  if (branchFilter.value) {
+  if (branchFilter.value && branchFilter.value !== ALL_BRANCHES_KEY) {
     return `Branch: ${branchFilter.value}`;
   }
   if (availableBranches.value.length === 0) {
     return 'No branches';
+  }
+  if (branchFilter.value === ALL_BRANCHES_KEY) {
+    return 'All branches';
   }
   return 'Select Branch';
 });
@@ -112,11 +116,18 @@ onMounted(async () => {
 
 watch(availableBranches, (branches) => {
   if (!branches.length) {
-    branchFilter.value = undefined;
+    branchFilter.value = ALL_BRANCHES_KEY;
     showBranchPanel.value = false;
     return;
   }
-  if (branchFilter.value && branches.includes(branchFilter.value)) {
+  if (!branchFilter.value) {
+    branchFilter.value = branches[0];
+    return;
+  }
+  if (branchFilter.value === ALL_BRANCHES_KEY) {
+    return;
+  }
+  if (branches.includes(branchFilter.value)) {
     return;
   }
   branchFilter.value = branches[0];
@@ -405,7 +416,7 @@ function commitBranches(artifact?: ArtifactModel): string[] {
 
 function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
   const branches = commitBranches(artifact);
-  if (branchFilter.value) {
+  if (branchFilter.value && branchFilter.value !== ALL_BRANCHES_KEY) {
     return branches.filter((branch) => branch === branchFilter.value);
   }
   return branches;
@@ -460,7 +471,11 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
 
       <div v-if="selectedSource" class="workspace-wrapper">
         <div class="view-tabs">
-          <button type="button" :class="{ active: showBranchPanel || !!branchFilter }" @click="toggleBranchPanel">
+          <button
+            type="button"
+            :class="{ active: showBranchPanel || (branchFilter && branchFilter !== ALL_BRANCHES_KEY) }"
+            @click="toggleBranchPanel"
+          >
             {{ showBranchPanel ? 'Hide Branches' : branchButtonLabel }}
           </button>
           <button type="button" :class="{ active: showCommits }" @click="toggleCommits">
@@ -490,6 +505,12 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
               <div v-if="!availableBranches.length" class="placeholder">No branches available.</div>
               <template v-else>
                 <ul>
+                  <li
+                    :class="{ active: branchFilter === ALL_BRANCHES_KEY || !branchFilter }"
+                    @click="selectBranchFilter(ALL_BRANCHES_KEY)"
+                  >
+                    <span>All branches</span>
+                  </li>
                   <li
                     v-for="branch in visibleBranches"
                     :key="branch"
@@ -524,7 +545,11 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
             <div class="commit-list">
               <div v-if="loadingArtifacts && !filteredCommits.length" class="placeholder">Loading commits…</div>
               <div v-else-if="!filteredCommits.length" class="placeholder">
-                {{ branchFilter ? 'No commits found for this branch.' : 'No commits found for this source.' }}
+                {{
+                  branchFilter && branchFilter !== ALL_BRANCHES_KEY
+                    ? 'No commits found for this branch.'
+                    : 'No commits found for this source.'
+                }}
               </div>
               <template v-else>
                 <ul>
@@ -577,7 +602,11 @@ function commitBranchesForDisplay(artifact?: ArtifactModel): string[] {
               />
               <p v-else-if="loadingArtifacts" class="placeholder">Loading repository files…</p>
               <p v-else class="placeholder">
-                {{ branchFilter ? 'No commits match the selected branch.' : 'No commits available for this source.' }}
+                {{
+                  branchFilter && branchFilter !== ALL_BRANCHES_KEY
+                    ? 'No commits match the selected branch.'
+                    : 'No commits available for this source.'
+                }}
               </p>
             </div>
           </div>
