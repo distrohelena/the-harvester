@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import type { ArtifactModel, SourceModel } from '../../types/plugins';
 import { fetchSources } from '../../api/sources';
 import { fetchArtifacts } from '../../api/artifacts';
+import { fetchNavigation, type NavigationNode } from '../../api/navigation';
 
 interface JiraArtifactData {
   key?: string;
@@ -49,6 +50,7 @@ const projectPanelOpen = ref(false);
 const projectSearch = ref('');
 const loadingSources = ref(false);
 const loadingIssues = ref(false);
+const navigationProjects = ref<ProjectOption[]>([]);
 const errorMessage = ref<string>();
 const pagination = ref({ page: 1, limit: 25, total: 0 });
 
@@ -69,7 +71,7 @@ interface ProjectOption {
   key: string;
   label: string;
 }
-const projectOptions = computed<ProjectOption[]>(() => {
+const issueProjectOptions = computed<ProjectOption[]>(() => {
   const map = new Map<string, ProjectOption>();
   for (const issue of issues.value) {
     const projectKey = issueProjectKey(issue) ?? UNKNOWN_PROJECT_KEY;
@@ -80,6 +82,19 @@ const projectOptions = computed<ProjectOption[]>(() => {
       });
     }
   }
+  return Array.from(map.values());
+});
+// Merge navigation-provided projects with ones detected from issues so the selection list stays complete.
+const projectOptions = computed<ProjectOption[]>(() => {
+  const map = new Map<string, ProjectOption>();
+  navigationProjects.value.forEach((option) => {
+    map.set(option.key, option);
+  });
+  issueProjectOptions.value.forEach((option) => {
+    if (!map.has(option.key)) {
+      map.set(option.key, option);
+    }
+  });
   return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
 });
 const filteredIssues = computed(() => {
@@ -98,6 +113,16 @@ const selectedProjectLabel = computed(() => {
   }
   const selected = projectOptions.value.find((option) => option.key === selectedProjectKey.value);
   return selected?.label ?? selectedProjectKey.value ?? 'All projects';
+});
+// Mirror the Git browser toggles so the Jira button shows both state and selection context.
+const projectButtonLabel = computed(() => {
+  if (!projectOptions.value.length) {
+    return 'No projects';
+  }
+  if (!selectedProjectKey.value || selectedProjectKey.value === ALL_PROJECTS_KEY) {
+    return 'Select Project';
+  }
+  return `Project: ${selectedProjectLabel.value}`;
 });
 const visibleProjectOptions = computed(() => {
   if (!projectOptions.value.length) {
@@ -141,9 +166,11 @@ watch(
       selectedProjectKey.value = ALL_PROJECTS_KEY;
       projectPanelOpen.value = false;
       projectSearch.value = '';
-      await loadIssues(next);
+      navigationProjects.value = [];
+      await Promise.all([loadIssues(next), loadProjectNavigation(next)]);
     } else if (!next) {
       issues.value = [];
+      navigationProjects.value = [];
       selectedProjectKey.value = ALL_PROJECTS_KEY;
       projectPanelOpen.value = false;
       projectSearch.value = '';
@@ -239,9 +266,23 @@ async function loadIssues(sourceId: string, append = false) {
   }
 }
 
-function refreshIssues() {
+async function loadProjectNavigation(sourceId: string) {
+  if (!sourceId) {
+    navigationProjects.value = [];
+    return;
+  }
+  try {
+    const navigation = await fetchNavigation(sourceId);
+    navigationProjects.value = deriveProjectsFromNavigation(navigation?.nodes);
+  } catch (error) {
+    // Keep falling back to issue-derived projects if the navigation endpoint fails.
+    navigationProjects.value = [];
+  }
+}
+
+async function refreshIssues() {
   if (selectedSourceId.value) {
-    loadIssues(selectedSourceId.value);
+    await Promise.all([loadIssues(selectedSourceId.value), loadProjectNavigation(selectedSourceId.value)]);
   }
 }
 
@@ -303,6 +344,32 @@ function issueKey(issue?: ArtifactModel) {
   return data?.key ?? issue?.displayName ?? issue?.id;
 }
 
+// Always hydrate the picker from navigation metadata so we show every project even when the current page of issues only contains one project.
+function deriveProjectsFromNavigation(nodes?: NavigationNode[]): ProjectOption[] {
+  if (!Array.isArray(nodes)) {
+    return [];
+  }
+  return nodes
+    .map((node) => normalizeNavigationProjectNode(node))
+    .filter((option): option is ProjectOption => Boolean(option));
+}
+
+function normalizeNavigationProjectNode(node?: NavigationNode): ProjectOption | null {
+  if (!node?.id || typeof node.label !== 'string') {
+    return null;
+  }
+  const prefix = 'project-';
+  if (!node.id.startsWith(prefix)) {
+    return null;
+  }
+  const key = node.id.slice(prefix.length);
+  if (!key) {
+    return null;
+  }
+  const label = node.label.trim().length ? node.label : key;
+  return { key, label };
+}
+
 function projectLabel(data?: JiraArtifactData, metadata?: JiraArtifactMetadata) {
   const projectKey = data?.project?.key ?? metadata?.projectKey;
   const projectName = data?.project?.name ?? metadata?.projectName;
@@ -326,6 +393,13 @@ function renderDescription(description?: string) {
   if (!description) return 'No description available.';
   return description;
 }
+
+function sourceProjectLabel(source?: SourceModel) {
+  if (!source) return undefined;
+  const key = source.options?.projectKey ?? source.options?.projectKeys?.[0];
+  // Custom JQL sources do not have a stable project key; hiding the fallback keeps the source list clean.
+  return key;
+}
 </script>
 
 <template>
@@ -346,7 +420,7 @@ function renderDescription(description?: string) {
           @click="selectedSourceId = source.id"
         >
           <p>{{ source.name }}</p>
-          <small>{{ source.options?.projectKey ?? source.options?.projectKeys?.[0] ?? 'Custom JQL' }}</small>
+          <small v-if="sourceProjectLabel(source)">{{ sourceProjectLabel(source) }}</small>
         </li>
       </ul>
       <p v-if="!sources.length && !loadingSources" class="placeholder">
@@ -371,14 +445,15 @@ function renderDescription(description?: string) {
       </header>
 
       <div v-if="projectOptions.length" class="project-controls">
-        <button
-          type="button"
-          class="ghost"
-          :class="{ active: projectPanelOpen }"
-          @click="toggleProjectPanel"
-        >
-          {{ projectPanelOpen ? 'Hide Projects' : 'View Projects' }}
-        </button>
+        <div class="view-tabs">
+          <button
+            type="button"
+            :class="{ active: projectPanelOpen || selectedProjectKey !== ALL_PROJECTS_KEY }"
+            @click="toggleProjectPanel"
+          >
+            {{ projectPanelOpen ? 'Hide Projects' : projectButtonLabel }}
+          </button>
+        </div>
         <p class="current-project">
           Showing:
           <strong>{{ selectedProjectLabel }}</strong>
@@ -390,7 +465,7 @@ function renderDescription(description?: string) {
       </div>
 
       <div class="issues-workspace" :class="{ 'projects-visible': projectPanelOpen }">
-        <aside class="project-panel" :class="{ open: projectPanelOpen }" aria-label="Jira projects list">
+        <aside class="project-panel" :class="{ visible: projectPanelOpen }" aria-label="Jira projects list">
           <header>
             <div>
               <h4>Projects</h4>
@@ -615,6 +690,7 @@ aside li.active {
   align-items: center;
   gap: 0.75rem;
   margin: 0.5rem 0;
+  flex-wrap: wrap;
 }
 
 .project-controls .current-project {
@@ -623,28 +699,42 @@ aside li.active {
   color: #4b5563;
 }
 
-.project-controls .ghost.active {
+.project-controls .view-tabs {
+  display: inline-flex;
+  gap: 0.5rem;
+}
+
+.project-controls .view-tabs button {
+  border: 1px solid #cbd5f5;
+  border-radius: 999px;
+  background: #fff;
+  padding: 0.35rem 1rem;
+  cursor: pointer;
+}
+
+.project-controls .view-tabs button.active {
   background: #1d4ed8;
   color: #fff;
   border-color: #1d4ed8;
 }
 
-
 .issues-workspace {
-  position: relative;
+  display: flex;
+  gap: 0;
+  align-items: stretch;
   min-height: 360px;
+  overflow: hidden;
 }
 
 .issues-workspace.projects-visible .issues-content {
-  margin-left: 300px;
+  margin-left: 1rem;
 }
 
 .project-panel {
-  position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
+  flex: 0 0 auto;
   width: 280px;
+  max-width: 280px;
+  margin-right: -280px;
   border: 1px solid #d1d5db;
   border-radius: 0.5rem;
   background: #fff;
@@ -652,20 +742,21 @@ aside li.active {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  transform: translateX(-110%);
-  opacity: 0;
-  visibility: hidden;
-  transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out, opacity 0.2s ease-in-out;
-  z-index: 10;
+  min-height: 0;
+  overflow: hidden;
   pointer-events: none;
+  transform: translateX(-100%);
+  opacity: 0;
+  transition: transform 0.3s ease, opacity 0.2s ease, margin-right 0.3s ease, box-shadow 0.2s ease;
 }
 
-.project-panel.open {
+.project-panel.visible {
+  opacity: 1;
+  pointer-events: auto;
+  margin-right: 0;
   transform: translateX(0);
   box-shadow: 0 10px 25px rgba(15, 23, 42, 0.15);
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
+  overflow: visible;
 }
 
 .project-panel header {
@@ -717,11 +808,13 @@ aside li.active {
 }
 
 .issues-content {
+  flex: 1 1 auto;
+  min-width: 0;
   display: grid;
   grid-template-columns: 320px 1fr;
   gap: 1rem;
   min-height: 360px;
-  transition: margin-left 0.2s ease-in-out;
+  transition: margin-left 0.3s ease;
 }
 
 .issue-list ul {
@@ -765,6 +858,11 @@ aside li.active {
 
 .issue-meta {
   text-align: right;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.15rem;
+  /* Stack status above assignee so the badge stays top-right while the name sits just below it. */
 }
 
 .badge {

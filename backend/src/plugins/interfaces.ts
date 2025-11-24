@@ -10,6 +10,8 @@ export interface PluginSchemaField {
     enumValues?: string[];
     description?: string;
     multiline?: boolean;
+    /** Hint to downstream UIs about how to render sensitive string content (e.g. API tokens). */
+    inputType?: 'text' | 'password';
 }
 
 export interface PluginSchema {

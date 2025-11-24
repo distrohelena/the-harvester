@@ -8,6 +8,8 @@ export interface PluginSchemaField {
   enumValues?: string[];
   description?: string;
   multiline?: boolean;
+  /** Optional hint for UI components when collecting sensitive strings like API tokens. */
+  inputType?: 'text' | 'password';
 }
 
 export interface PluginSchema {

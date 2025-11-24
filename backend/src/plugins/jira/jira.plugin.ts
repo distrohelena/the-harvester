@@ -81,7 +81,13 @@ export class JiraPlugin implements Plugin {
       fields: [
         { name: 'siteUrl', label: 'Site URL', type: 'string', required: true },
         { name: 'email', label: 'User Email', type: 'string', required: true },
-        { name: 'apiToken', label: 'API Token', type: 'string', required: true },
+        {
+          name: 'apiToken',
+          label: 'API Token',
+          type: 'string',
+          required: true,
+          inputType: 'password'
+        },
         {
           name: 'recentItems',
           label: 'Recent Items',

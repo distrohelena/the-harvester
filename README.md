@@ -85,6 +85,8 @@ The `jira` plugin mirrors the workflow used in the standalone Jira VS Code exten
 - Discovers every accessible project through Jira's REST API.
 - Pulls the latest issues for each project (leave the recent limit blank to fetch everything, or set a cap if you only need the most recent tickets) with their summary, status, assignee, labels, and timestamps.
 - Builds navigation grouped by project → status, so you can browse tickets the same way as the editor integration.
+- Uses the same **View Projects** toggle as the Git browser's branch/commit pills, so the button doubles as both the drawer control and a live indicator of which project filter (if any) is active—no need to reopen the drawer just to confirm the current scope.
+- Hydrates that drawer from the Jira navigation API so that every project discovered during extraction is listed even when the currently loaded issue page only contains a single project's artifacts—this keeps the picker parity with Git's always-complete branch list.
 
 No extra configuration is required—just point it at a Jira tenant and the extractor handles pagination, legacy endpoint fallbacks, and artifact normalization. On the frontend the **Plugins → Jira** tab lists sources, renders projects/issues, and links directly back to Jira for deeper actions.
 

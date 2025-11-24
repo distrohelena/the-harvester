@@ -127,13 +127,15 @@ export class ConfluencePlugin implements Plugin {
           name: 'apiToken',
           label: 'API Token',
           type: 'string',
-          description: 'API token for Confluence Cloud (paired with User Email)'
+          description: 'API token for Confluence Cloud (paired with User Email)',
+          inputType: 'password'
         },
         {
           name: 'personalAccessToken',
           label: 'Personal Access Token',
           type: 'string',
-          description: 'Alternative bearer token for Confluence Data Center / Server'
+          description: 'Alternative bearer token for Confluence Data Center / Server',
+          inputType: 'password'
         },
         {
           name: 'spaceKeys',

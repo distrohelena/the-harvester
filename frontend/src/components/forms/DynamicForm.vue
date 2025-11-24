@@ -74,10 +74,20 @@ function getValue(field: PluginSchemaField) {
           @input="updateField(field, ($event.target as HTMLTextAreaElement).value)"
         />
       </template>
-      <template v-else-if="field.type === 'string' || field.type === 'number'">
+      <template v-else-if="field.type === 'string'">
         <input
           :id="field.name"
-          :type="field.type === 'number' ? 'number' : 'text'"
+          :type="field.inputType ?? 'text'"
+          :required="field.required"
+          :disabled="isDisabled"
+          :value="getValue(field)"
+          @input="updateField(field, ($event.target as HTMLInputElement).value)"
+        />
+      </template>
+      <template v-else-if="field.type === 'number'">
+        <input
+          :id="field.name"
+          type="number"
           :required="field.required"
           :disabled="isDisabled"
           :value="getValue(field)"
