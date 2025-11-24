@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, provide, ref, watch, type Ref } from 'vue';
+import { computed, inject, provide, ref, watch, type Ref } from 'vue';
 
 const EXPANDED_CTX = Symbol('docs-tree-expanded');
 
@@ -14,6 +14,7 @@ export interface DocsTreeNode {
 const props = defineProps<{
   nodes: DocsTreeNode[];
   selectedArtifactId?: string;
+  highlightedNodeIds?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -23,6 +24,7 @@ const emit = defineEmits<{
 const parentExpanded = inject<Ref<Set<string>> | null>(EXPANDED_CTX, null);
 const expanded = parentExpanded ?? ref<Set<string>>(new Set());
 const isRoot = parentExpanded === null;
+const highlightedSet = computed(() => new Set(props.highlightedNodeIds ?? []));
 
 if (!parentExpanded) {
   provide(EXPANDED_CTX, expanded);
@@ -117,7 +119,8 @@ function treeContainsArtifact(node: DocsTreeNode, artifactId: string): boolean {
             file: !isFolder(node),
             selectable: !!node.artifactId,
             selected: node.artifactId === selectedArtifactId && !node.anchor,
-            anchor: !!node.anchor
+            anchor: !!node.anchor,
+            highlighted: highlightedSet.has(node.id)
           }"
           role="button"
           tabindex="0"
@@ -141,6 +144,7 @@ function treeContainsArtifact(node: DocsTreeNode, artifactId: string): boolean {
         v-if="node.children?.length && isExpanded(node)"
         :nodes="node.children"
         :selected-artifact-id="selectedArtifactId"
+        :highlighted-node-ids="props.highlightedNodeIds"
         @select="emit('select', $event)"
       />
     </li>
@@ -224,6 +228,11 @@ ul.docs-tree {
   font-weight: 600;
   color: #0f172a;
   box-shadow: inset 0 0 0 1px #93c5fd;
+}
+
+.tree-node.highlighted {
+  box-shadow: inset 0 0 0 1px #fcd34d;
+  background: #fffbeb;
 }
 
 .tree-node:focus-visible {

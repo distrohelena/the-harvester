@@ -25,6 +25,18 @@ const selectedAnchorSlug = ref<string>();
 const contentRef = ref<HTMLElement | null>(null);
 const pendingArtifactId = ref<string | null>(null);
 let sourceLoadPromise: Promise<void> | null = null;
+const structureSearchQuery = ref('');
+const sourceSearchQuery = ref('');
+const sourceSearchMatches = ref(new Map<string, SourceMatch[]>());
+const globalSearchLoading = ref(false);
+const treeCache = new Map<string, DocsTreeNode[]>();
+const pendingTreeRequests = new Map<string, Promise<DocsTreeNode[]>>();
+let latestSourceSearchToken = 0;
+
+interface SourceMatch {
+  nodeId: string;
+  path: string;
+}
 
 const RESPONSIVE_MEDIA_SELECTORS = ['iframe', 'video', 'object', 'embed'];
 const RESPONSIVE_MEDIA_QUERY = RESPONSIVE_MEDIA_SELECTORS.join(', ');
@@ -41,6 +53,7 @@ const VIDEO_CONTAINER_SELECTORS = [
   'div[data-youtube-id]'
 ];
 const VIDEO_CONTAINER_QUERY = VIDEO_CONTAINER_SELECTORS.join(', ');
+const SOURCE_MATCH_PREVIEW_LIMIT = 5;
 
 const selectedArtifact = computed(() => {
   if (!selectedArtifactId.value) return undefined;
@@ -80,6 +93,34 @@ const tableOfContents = computed(() => {
     .filter((entry): entry is { text: string; anchor: string } => Boolean(entry));
 });
 
+const structureFilterResult = computed(() => {
+  const query = structureSearchQuery.value.trim().toLowerCase();
+  if (!query) {
+    return { nodes: state.tree, matches: [] as string[] };
+  }
+  return filterTreeByQuery(state.tree, query);
+});
+
+const displayedTree = computed<DocsTreeNode[]>(() => structureFilterResult.value.nodes);
+
+const structureHighlightIds = computed(() => {
+  if (!structureSearchQuery.value.trim()) {
+    return new Set<string>();
+  }
+  return new Set(structureFilterResult.value.matches);
+});
+
+const selectedSourceMatches = computed(() => sourceSearchMatches.value.get(state.selectedSourceId) ?? []);
+
+const sourceHighlightIds = computed(() => new Set(selectedSourceMatches.value.map((match) => match.nodeId)));
+
+const highlightedNodeIds = computed(() => {
+  const ids = new Set<string>();
+  structureHighlightIds.value.forEach((id) => ids.add(id));
+  sourceHighlightIds.value.forEach((id) => ids.add(id));
+  return Array.from(ids);
+});
+
 async function loadSources() {
   state.loadingSources = true;
   try {
@@ -96,11 +137,33 @@ async function loadSources() {
     if (!state.selectedSourceId && state.sources.length > 0) {
       state.selectedSourceId = state.sources[0].id;
     }
+    if (sourceSearchQuery.value.trim()) {
+      updateSourceSearchMatches(sourceSearchQuery.value);
+    }
   } catch (error: any) {
     state.error = error?.message ?? 'Failed to load documentation sources';
   } finally {
     state.loadingSources = false;
   }
+}
+
+async function fetchAllArtifacts(sourceId: string): Promise<ArtifactModel[]> {
+  const perPage = 100;
+  let page = 1;
+  let total = 0;
+  const collected: ArtifactModel[] = [];
+
+  do {
+    const response = await fetchArtifacts({ sourceId, limit: perPage, page });
+    collected.push(...response.items);
+    total = response.total;
+    page += 1;
+    if (collected.length >= total) {
+      break;
+    }
+  } while (collected.length < total);
+
+  return collected;
 }
 
 async function loadArtifactsForSource(sourceId: string) {
@@ -111,25 +174,12 @@ async function loadArtifactsForSource(sourceId: string) {
   selectedAnchorSlug.value = undefined;
 
   try {
-    const perPage = 100;
-    let page = 1;
-    let total = 0;
-    const collected: ArtifactModel[] = [];
-
-    do {
-      const response = await fetchArtifacts({ sourceId, limit: perPage, page });
-      collected.push(...response.items);
-      total = response.total;
-      page += 1;
-      if (collected.length >= total) {
-        break;
-      }
-    } while (collected.length < total);
-
+    const collected = await fetchAllArtifacts(sourceId);
     collected.forEach((artifact) => state.artifacts.set(artifact.id, artifact));
     const { tree, pathIndex } = buildTree(collected);
     state.tree = tree;
     state.pathIndex = pathIndex;
+    cacheTreeForSource(sourceId, tree);
     if (pendingArtifactId.value && state.artifacts.has(pendingArtifactId.value)) {
       selectedArtifactId.value = pendingArtifactId.value;
       pendingArtifactId.value = null;
@@ -140,10 +190,73 @@ async function loadArtifactsForSource(sourceId: string) {
     } else {
       selectedArtifactId.value = undefined;
     }
+    if (sourceSearchQuery.value.trim()) {
+      updateSourceSearchMatches(sourceSearchQuery.value);
+    }
   } catch (error: any) {
     state.error = error?.message ?? 'Failed to load documentation artifacts';
   } finally {
     state.loadingArtifacts = false;
+  }
+}
+
+function cacheTreeForSource(sourceId: string, tree: DocsTreeNode[]) {
+  treeCache.set(sourceId, tree);
+}
+
+async function ensureTreeForSource(sourceId: string): Promise<DocsTreeNode[]> {
+  if (treeCache.has(sourceId)) {
+    return treeCache.get(sourceId)!;
+  }
+  if (pendingTreeRequests.has(sourceId)) {
+    return pendingTreeRequests.get(sourceId)!;
+  }
+  const request = (async () => {
+    const artifacts = await fetchAllArtifacts(sourceId);
+    const { tree } = buildTree(artifacts);
+    cacheTreeForSource(sourceId, tree);
+    pendingTreeRequests.delete(sourceId);
+    return tree;
+  })();
+  pendingTreeRequests.set(sourceId, request);
+  return request;
+}
+
+async function updateSourceSearchMatches(rawQuery: string) {
+  const query = rawQuery.trim().toLowerCase();
+  const searchToken = ++latestSourceSearchToken;
+  if (!query) {
+    sourceSearchMatches.value = new Map();
+    globalSearchLoading.value = false;
+    return;
+  }
+  if (!state.sources.length) {
+    sourceSearchMatches.value = new Map();
+    globalSearchLoading.value = false;
+    return;
+  }
+  globalSearchLoading.value = true;
+  const matches = new Map<string, SourceMatch[]>();
+  for (const source of state.sources) {
+    if (searchToken !== latestSourceSearchToken) {
+      return;
+    }
+    try {
+      const tree = await ensureTreeForSource(source.id);
+      const results = collectSourceMatches(tree, query);
+      if (results.length) {
+        matches.set(source.id, results);
+      }
+    } catch (error) {
+      // Ignore errors for individual sources; user can still click into that project to retry.
+      if (import.meta.env.DEV) {
+        console.error('Docs search failed for source', source.id, error);
+      }
+    }
+  }
+  if (searchToken === latestSourceSearchToken) {
+    sourceSearchMatches.value = matches;
+    globalSearchLoading.value = false;
   }
 }
 
@@ -270,6 +383,58 @@ function buildTree(artifacts: ArtifactModel[]): { tree: DocsTreeNode[]; pathInde
     }
   }
   return { tree: roots, pathIndex };
+}
+
+function filterTreeByQuery(nodes: DocsTreeNode[], query: string): { nodes: DocsTreeNode[]; matches: string[] } {
+  const matches = new Set<string>();
+  if (!query) {
+    return { nodes, matches: [] };
+  }
+
+  const walk = (node: DocsTreeNode): DocsTreeNode | null => {
+    const label = node.label?.toLowerCase() ?? '';
+    const nodeMatches = label.includes(query);
+    const children = node.children?.map((child) => walk(child)).filter((child): child is DocsTreeNode => Boolean(child));
+    if (nodeMatches) {
+      matches.add(node.id);
+    }
+    if (children && children.length) {
+      return { ...node, children };
+    }
+    if (nodeMatches) {
+      return { ...node, children: node.children };
+    }
+    return null;
+  };
+
+  const filtered = nodes
+    .map((node) => walk(node))
+    .filter((node): node is DocsTreeNode => Boolean(node));
+  return { nodes: filtered.length ? filtered : [], matches: Array.from(matches) };
+}
+
+function collectSourceMatches(nodes: DocsTreeNode[], query: string, ancestors: string[] = []): SourceMatch[] {
+  const results: SourceMatch[] = [];
+  for (const node of nodes) {
+    const labelText = node.label ?? '';
+    const nextPath = [...ancestors, labelText];
+    const label = labelText.toLowerCase();
+    const nodeMatches = label.includes(query);
+    if (nodeMatches) {
+      results.push({
+        nodeId: node.id,
+        path: nextPath.join(' / ')
+      });
+    }
+    if (node.children?.length) {
+      results.push(...collectSourceMatches(node.children, query, nextPath));
+    }
+  }
+  return results;
+}
+
+function sourceMatchesForDisplay(sourceId: string): SourceMatch[] {
+  return sourceSearchMatches.value.get(sourceId) ?? [];
 }
 
 function normalizeDocPath(path?: string | null): string {
@@ -638,10 +803,18 @@ watch(
   () => state.selectedSourceId,
   (next) => {
     if (next) {
+      structureSearchQuery.value = '';
       queueSourceLoad(next);
+    }
+    if (!next) {
+      structureSearchQuery.value = '';
     }
   }
 );
+
+watch(sourceSearchQuery, (next) => {
+  updateSourceSearchMatches(next);
+});
 </script>
 
 <template>
@@ -653,16 +826,45 @@ watch(
           {{ state.loadingSources ? 'Refreshing…' : 'Refresh' }}
         </button>
       </header>
+      <div class="source-search">
+        <input
+          type="search"
+          v-model="sourceSearchQuery"
+          placeholder="Search all projects"
+          aria-label="Search documentation projects"
+        />
+        <span v-if="globalSearchLoading" class="search-status">Searching…</span>
+        <span v-else-if="sourceSearchQuery && !sourceSearchMatches.size" class="search-status">
+          No matches
+        </span>
+      </div>
       <div v-if="state.loadingSources">Loading sources…</div>
       <div v-else-if="!state.sources.length">No documentation sources found.</div>
       <ul v-else>
         <li
           v-for="source in state.sources"
           :key="source.id"
-          :class="{ active: source.id === state.selectedSourceId }"
+          :class="{
+            active: source.id === state.selectedSourceId,
+            highlighted: !!sourceMatchesForDisplay(source.id).length
+          }"
           @click="state.selectedSourceId = source.id"
         >
-          {{ source.name }}
+          <div class="source-row">
+            <p>{{ source.name }}</p>
+            <small v-if="source.id === state.selectedSourceId">Selected</small>
+          </div>
+          <ul v-if="sourceMatchesForDisplay(source.id).length" class="source-match-list">
+            <li
+              v-for="match in sourceMatchesForDisplay(source.id).slice(0, SOURCE_MATCH_PREVIEW_LIMIT)"
+              :key="match.nodeId"
+            >
+              {{ match.path }}
+            </li>
+            <li v-if="sourceMatchesForDisplay(source.id).length > SOURCE_MATCH_PREVIEW_LIMIT">
+              +{{ sourceMatchesForDisplay(source.id).length - SOURCE_MATCH_PREVIEW_LIMIT }} more…
+            </li>
+          </ul>
         </li>
       </ul>
     </div>
@@ -672,9 +874,30 @@ watch(
         <h3>Structure</h3>
         <span v-if="state.loadingArtifacts">Loading pages…</span>
       </header>
+      <div class="tree-search">
+        <input
+          type="search"
+          v-model="structureSearchQuery"
+          placeholder="Search this project"
+          aria-label="Search within this project's structure"
+        />
+        <button
+          v-if="structureSearchQuery"
+          type="button"
+          class="ghost"
+          @click="structureSearchQuery = ''"
+        >
+          Clear
+        </button>
+      </div>
+      <p v-if="structureSearchQuery && !displayedTree.length" class="placeholder">
+        No matches in this project.
+      </p>
       <DocsTree
-        :nodes="state.tree"
+        v-else
+        :nodes="displayedTree"
         :selected-artifact-id="selectedArtifactId"
+        :highlighted-node-ids="highlightedNodeIds"
         @select="({ artifactId, anchor }) => selectArtifact(artifactId, anchor)"
       />
     </div>
@@ -743,6 +966,25 @@ watch(
   margin-bottom: 0.5rem;
 }
 
+.source-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.source-search input {
+  flex: 1;
+  border: 1px solid #d1d5db;
+  border-radius: 0.35rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.search-status {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
 .sources-panel ul {
   list-style: none;
   padding: 0;
@@ -763,15 +1005,60 @@ watch(
   font-weight: 600;
 }
 
+.sources-panel li.highlighted {
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+}
+
+.source-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.source-row p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.source-row small {
+  color: #6b7280;
+}
+
+.source-match-list {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+  color: #475569;
+  font-size: 0.85rem;
+}
+
+.source-match-list li {
+  margin: 0.1rem 0;
+}
+
 .tree-panel {
   overflow-y: auto;
 }
 
 .tree-panel header {
   display: flex;
-  justify-content:inline;
+  justify-content: space-between;
   align-items: center;
   margin-bottom: 0.5rem;
+}
+
+.tree-search {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.tree-search input {
+  flex: 1;
+  border: 1px solid #d1d5db;
+  border-radius: 0.35rem;
+  padding: 0.35rem 0.5rem;
 }
 
 .content-panel {

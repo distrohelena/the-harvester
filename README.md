@@ -76,6 +76,7 @@ The `docs` plugin now understands versioned documentation portals:
 - **Manual versions:** fill `manualVersions` with one entry per line shaped like `v2|/docs/v2/`. The part before `|` is the label, after is the path (relative or absolute). If omitted, the same value is used for both.
 - **Start paths:** seed each version crawl with relative paths (default `/`). The crawler stays within the detected version prefix, following links that match `followSelector` (defaults to `a[href]`) until it reaches `maxPages` pages per version (default 50).
 - **Content extraction:** customize `contentSelector`, `titleSelector`, and `headingSelector` (comma-separated selectors) to match each site.
+- **Dual search:** the Docs browser now has a project-level search box above the structure tree plus a global sources search so you can highlight every project whose structure contains a match (with inline previews) before drilling into the exact page.
 
 This makes it easy to point the harvester at frameworks whose docs publish multiple live versions (e.g., `/docs/v2`, `/docs/v3`). Each scraped page becomes an artifact keyed by version so you can diff and browse per release.
 
