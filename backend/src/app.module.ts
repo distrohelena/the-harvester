@@ -12,20 +12,14 @@ import { RunsModule } from './runs/runs.module.js';
 import { PluginModule } from './plugins/plugin.module.js';
 import { ExtractionModule } from './extraction/extraction.module.js';
 import { NavigationModule } from './navigation/navigation.module.js';
+import { buildDatabaseOptions } from './config/database.config.js';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration] }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: (config: ConfigService) => ({
-        type: 'postgres',
-        url:
-          config.get<string>('DATABASE_URL') ??
-          'postgres://artifact_harvester:artifact_harvester@localhost:5432/artifact_harvester',
-        entities: [SourceEntity, ArtifactEntity, ArtifactVersionEntity, ExtractionRunEntity],
-        synchronize: true
-      }),
+      useFactory: (config: ConfigService) => buildDatabaseOptions(config),
       inject: [ConfigService]
     }),
     PluginModule,

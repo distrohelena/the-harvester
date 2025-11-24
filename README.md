@@ -49,6 +49,13 @@ This repo follows the `AGENTS.md` specification for a plugin-driven artifact ext
 2. **Environment**
    - PostgreSQL connection via `DATABASE_URL` (defaults to `postgres://artifact_harvester:artifact_harvester@localhost:5432/artifact_harvester`).
    - Redis connection via `REDIS_URL` (defaults to `redis://localhost:6379`).
+   - IPv6 localhost on macOS: quote the URI so the shell doesn’t glob the brackets (e.g., `DATABASE_URL="postgres://artifact_harvester:artifact_harvester@[::1]:5432/artifact_harvester"` and `REDIS_URL="redis://[::1]:6379"`). The backend now strips the brackets before handing the host to Node’s DNS to avoid `getaddrinfo ENOTFOUND [::1]` errors.
+
+### Redis connectivity (Docker Desktop on macOS)
+- Docker Desktop runs the dev container stack in its own VM. From the host you can hit the forwarded port with `redis-cli -u redis://127.0.0.1:6379 ping`, but from inside the `workspace` container you must use the service name (`redis-cli -u redis://redis:6379 ping` or `REDIS_URL=redis://redis:6379`) because `127.0.0.1` points back to the workspace container itself.
+- If the host-side CLI hangs, first make sure the container is up and reachable on the Docker network: `docker compose -f .devcontainer/docker-compose.yml up -d redis` then `docker compose -f .devcontainer/docker-compose.yml exec redis redis-cli ping` (this bypasses host networking to confirm the server replies with `PONG`).
+- A hanging CLI on the host usually means the port is not actually bound (either because Redis was never started or another local process already owns 6379). Check for conflicts with `lsof -i tcp:6379`; free the port or change the mapping before retrying the ping.
+- On backend startup the extraction queue now waits for Redis to answer and logs the sanitized endpoint it tried (no credentials). If you see it fail fast, double-check `REDIS_URL` matches whether you are running on the host (`redis://127.0.0.1:6379`) or inside the devcontainer (`redis://redis:6379`).
 
 3. **Run services**
    - Backend: `npm run start:dev` from `backend/`.

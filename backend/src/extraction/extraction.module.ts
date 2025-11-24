@@ -11,6 +11,7 @@ import { ExtractionService } from './extraction.service.js';
 import { ExtractionProcessor } from './extraction.processor.js';
 import { ExtractionQueueService } from './queue/extraction-queue.service.js';
 import { EXTRACTION_QUEUE } from './extraction.constants.js';
+import { resolveRedisUrl } from '../config/redis.config.js';
 
 @Module({
   imports: [
@@ -18,7 +19,7 @@ import { EXTRACTION_QUEUE } from './extraction.constants.js';
     BullModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => ({
-        connection: { url: config.get<string>('redisUrl') ?? 'redis://localhost:6379' }
+        connection: { url: resolveRedisUrl(config) }
       }),
       inject: [ConfigService]
     }),
