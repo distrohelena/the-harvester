@@ -16,6 +16,7 @@ This repo follows the `AGENTS.md` specification for a plugin-driven artifact ext
 - **NestJS + TypeORM** with entities for Sources, Artifacts, ArtifactVersions, and ExtractionRuns.
 - **BullMQ queue** (`artifact-harvester-extractions`) schedules extraction jobs through `ExtractionQueueService` and `ExtractionProcessor` workers.
 - **Plugin system** with registry-provided descriptors and extractors for `docs`, `confluence`, `git`, `jira`, and `plain_website` plugins.
+- Git plugin SSH clones now force batch mode with short connection timeouts so private key issues fail fast instead of hanging during extraction.
 - **REST API** matching `AGENTS.md`: `/plugins`, `/sources`, `/artifacts`, `/runs`, `/sources/:id/run`, `/sources/:id/navigation`, etc.
 - **Extraction pipeline** (`ExtractionService`) normalizes plugin output, computes checksums, versions artifacts, and records run statistics.
 

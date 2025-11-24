@@ -1124,7 +1124,10 @@ export class GitPlugin implements Plugin {
         `ssh -i ${keyPath} ` +
         '-o IdentitiesOnly=yes ' +
         '-o StrictHostKeyChecking=no ' +
-        '-o UserKnownHostsFile=/dev/null'
+        '-o UserKnownHostsFile=/dev/null ' +
+        '-o BatchMode=yes ' +
+        '-o ConnectTimeout=20 ' +
+        '-o ConnectionAttempts=1'
     };
 
     return {
