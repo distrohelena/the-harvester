@@ -71,6 +71,7 @@ function getValue(field: PluginSchemaField) {
           :disabled="isDisabled"
           :required="field.required"
           :value="getValue(field)"
+          :class="{ 'masked-input': field.inputType === 'password' }"
           @input="updateField(field, ($event.target as HTMLTextAreaElement).value)"
         />
       </template>
@@ -157,5 +158,12 @@ label {
 
 small {
   color: #6b7280;
+}
+
+.masked-input {
+  -webkit-text-security: disc;
+  color: transparent;
+  text-shadow: 0 0 0 #0f172a;
+  caret-color: #0f172a;
 }
 </style>

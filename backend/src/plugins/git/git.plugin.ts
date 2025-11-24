@@ -123,14 +123,16 @@ export class GitPlugin implements Plugin {
           name: 'authToken',
           label: 'Auth Token',
           type: 'string',
-          description: 'Optional token for private HTTPS repositories'
+          description: 'Optional token for private HTTPS repositories',
+          inputType: 'password'
         },
         {
           name: 'sshPrivateKey',
           label: 'SSH Private Key',
           type: 'string',
           description: 'Optional private key for git@ style cloning',
-          multiline: true
+          multiline: true,
+          inputType: 'password'
         }
       ]
     },

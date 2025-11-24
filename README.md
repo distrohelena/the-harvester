@@ -22,6 +22,7 @@ This repo follows the `AGENTS.md` specification for a plugin-driven artifact ext
 ### Frontend Highlights
 - **Vue 3 + Pinia + Vue Router** single-page app served from `frontend/`.
 - Dynamic **Source management** UI with schema-driven forms generated from plugin descriptors.
+- Git plugin credential fields now render as password inputs so SSH tokens and private keys stay hidden in the UI.
 - **Artifact explorer** with search/filtering and JSON-based detail viewer + version history.
 - **Plugin navigation views** (`DocsNavigationView`, `GitNavigationView`, `PlainWebsiteNavigationView`) rendered through a `NavigationRenderer` based on plugin-provided navigation schema.
 - Dedicated **Runs dashboard** for monitoring extraction progress.
