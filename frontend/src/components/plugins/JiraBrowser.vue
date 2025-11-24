@@ -604,10 +604,15 @@ function sourceProjectLabel(source?: SourceModel) {
 </template>
 
 <style scoped>
+/* Keep the Jira layout scrollable inside the fixed-height plugins shell by owning height/overflow locally. */
 .jira-browser {
   display: grid;
   grid-template-columns: 240px 1fr;
+  grid-template-rows: 1fr;
   gap: 1rem;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 aside {
@@ -618,6 +623,7 @@ aside {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  min-height: 0;
 }
 
 aside header {
@@ -633,6 +639,9 @@ aside ul {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 aside li {
@@ -655,6 +664,8 @@ aside li.active {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  height: 100%;
+  min-height: 0;
 }
 
 .issues-panel header {
@@ -722,7 +733,8 @@ aside li.active {
   display: flex;
   gap: 0;
   align-items: stretch;
-  min-height: 360px;
+  min-height: 0;
+  flex: 1 1 auto;
   overflow: hidden;
 }
 
@@ -813,8 +825,16 @@ aside li.active {
   display: grid;
   grid-template-columns: 320px 1fr;
   gap: 1rem;
-  min-height: 360px;
+  min-height: 0;
+  height: 100%;
   transition: margin-left 0.3s ease;
+}
+
+.issue-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
 }
 
 .issue-list ul {
@@ -824,6 +844,9 @@ aside li.active {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .issue-list li {
@@ -883,10 +906,12 @@ aside li.active {
   border: 1px solid #e5e7eb;
   border-radius: 0.5rem;
   padding: 0.75rem;
-  min-height: 320px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  flex: 1 1 auto;
+  overflow: auto;
 }
 
 .issue-details header {
