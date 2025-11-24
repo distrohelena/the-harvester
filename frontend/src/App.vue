@@ -5,7 +5,7 @@
       <nav>
         <RouterLink to="/sources">Sources</RouterLink>
         <RouterLink to="/artifacts">Artifacts</RouterLink>
-        <RouterLink to="/plugins">Plugins</RouterLink>
+        <RouterLink to="/plugins/docs">Plugins</RouterLink>
         <RouterLink to="/runs">Runs</RouterLink>
       </nav>
     </header>
@@ -17,6 +17,8 @@
 
 <style scoped>
 .app-shell {
+  /* Keep title bar consistent: the header never shrinks below 48px, so expose that as a variable other views can subtract. */
+  --title-bar-size: max(5vh, 48px);
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -29,9 +31,7 @@ header {
   padding: 0 2rem;
   background: #111827;
   color: #fff;
-  height: 5vh;
-  min-height: 48px;
-  max-height: 5vh;
+  height: var(--title-bar-size);
 }
 
 nav {
@@ -56,8 +56,9 @@ main {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  height: 94.5vh;
-  max-height: 94.5vh;
+  /* Reserve explicit space for the global title bar plus ~2rem of breathing room so inner panels can mirror the calculation. */
+  height: calc(100vh - var(--title-bar-size) - 2rem);
+  max-height: calc(100vh - var(--title-bar-size) - 2rem);
   box-sizing: border-box;
 }
 </style>

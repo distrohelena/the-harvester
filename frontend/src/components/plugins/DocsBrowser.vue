@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { fetchSources } from '../../api/sources';
-import { fetchArtifacts } from '../../api/artifacts';
+import { fetchArtifacts, fetchArtifact } from '../../api/artifacts';
 import type { ArtifactModel, SourceModel } from '../../types/plugins';
 import DocsTree, { DocsTreeNode } from './DocsTree.vue';
+
+const props = defineProps<{ selectedArtifactId?: string }>();
+const emit = defineEmits<{ (e: 'update:selectedArtifactId', artifactId?: string): void }>();
 
 const state = reactive({
   sources: [] as SourceModel[],
@@ -18,7 +21,10 @@ const state = reactive({
 
 const selectedArtifactId = ref<string>();
 const selectedAnchorSlug = ref<string>();
+// Track the scrollable content panel so selecting a new doc can reset scroll position reliably and evaluate links after render.
 const contentRef = ref<HTMLElement | null>(null);
+const pendingArtifactId = ref<string | null>(null);
+let sourceLoadPromise: Promise<void> | null = null;
 
 const RESPONSIVE_MEDIA_SELECTORS = ['iframe', 'video', 'object', 'embed'];
 const RESPONSIVE_MEDIA_QUERY = RESPONSIVE_MEDIA_SELECTORS.join(', ');
@@ -78,7 +84,15 @@ async function loadSources() {
   state.loadingSources = true;
   try {
     const response = await fetchSources({ pluginKey: 'docs', limit: 100 });
-    state.sources = response.items;
+    const existing = [...state.sources];
+    const merged = new Map<string, SourceModel>();
+    response.items.forEach((source) => merged.set(source.id, source));
+    existing.forEach((source) => {
+      if (!merged.has(source.id)) {
+        merged.set(source.id, source);
+      }
+    });
+    state.sources = Array.from(merged.values());
     if (!state.selectedSourceId && state.sources.length > 0) {
       state.selectedSourceId = state.sources[0].id;
     }
@@ -93,7 +107,7 @@ async function loadArtifactsForSource(sourceId: string) {
   state.loadingArtifacts = true;
   state.tree = [];
   state.artifacts.clear();
-  selectedArtifactId.value = undefined;
+  const previousSelection = selectedArtifactId.value;
   selectedAnchorSlug.value = undefined;
 
   try {
@@ -116,13 +130,73 @@ async function loadArtifactsForSource(sourceId: string) {
     const { tree, pathIndex } = buildTree(collected);
     state.tree = tree;
     state.pathIndex = pathIndex;
-    if (collected.length > 0) {
+    if (pendingArtifactId.value && state.artifacts.has(pendingArtifactId.value)) {
+      selectedArtifactId.value = pendingArtifactId.value;
+      pendingArtifactId.value = null;
+    } else if (previousSelection && state.artifacts.has(previousSelection)) {
+      selectedArtifactId.value = previousSelection;
+    } else if (collected.length > 0) {
       selectedArtifactId.value = collected[0].id;
+    } else {
+      selectedArtifactId.value = undefined;
     }
   } catch (error: any) {
     state.error = error?.message ?? 'Failed to load documentation artifacts';
   } finally {
     state.loadingArtifacts = false;
+  }
+}
+
+const queueSourceLoad = (sourceId: string) => {
+  const promise = loadArtifactsForSource(sourceId);
+  sourceLoadPromise = promise;
+  promise.finally(() => {
+    if (sourceLoadPromise === promise) {
+      sourceLoadPromise = null;
+    }
+  });
+  return promise;
+};
+
+const awaitSourceLoad = async () => {
+  if (sourceLoadPromise) {
+    await sourceLoadPromise;
+  }
+};
+
+// Allow direct navigation to /plugins/docs/:artifactId by fetching the artifact + selecting the owning source on demand.
+async function ensureArtifactSelection(artifactId: string) {
+  if (!artifactId) {
+    return;
+  }
+  if (state.artifacts.has(artifactId)) {
+    selectedArtifactId.value = artifactId;
+    pendingArtifactId.value = null;
+    return;
+  }
+  try {
+    const artifact = await fetchArtifact(artifactId);
+    const sourceId = artifact.source?.id;
+    if (!sourceId) {
+      return;
+    }
+    if (!state.sources.find((source) => source.id === sourceId)) {
+      state.sources.push(artifact.source);
+    }
+    if (state.selectedSourceId !== sourceId) {
+      state.selectedSourceId = sourceId;
+      await nextTick();
+      await awaitSourceLoad();
+    } else {
+      await queueSourceLoad(sourceId);
+    }
+    if (state.artifacts.has(artifactId)) {
+      selectedArtifactId.value = artifactId;
+      pendingArtifactId.value = null;
+    }
+  } catch (error: any) {
+    state.error = error?.message ?? 'Failed to load documentation page';
+    pendingArtifactId.value = null;
   }
 }
 
@@ -236,6 +310,7 @@ const renderedHtml = computed(() => {
 function scheduleEmbeddedMediaNormalization() {
   nextTick(() => {
     normalizeEmbeddedMedia();
+    disableUnharvestedLinks();
   });
 }
 
@@ -259,7 +334,7 @@ function normalizeEmbeddedMedia(): void {
   });
 
   if (VIDEO_CONTAINER_QUERY.length) {
-    container.querySelectorAll<HTMLElement>(VIDEO_CONTAINER_QUERY).forEach((element) => {
+  container.querySelectorAll<HTMLElement>(VIDEO_CONTAINER_QUERY).forEach((element) => {
       if (element.classList.contains('doc-embed-wrapper')) {
         return;
       }
@@ -384,6 +459,54 @@ function scrollToAnchor(anchor: string) {
   });
 }
 
+function disableUnharvestedLinks(): void {
+  const artifact = selectedArtifact.value;
+  const container = contentRef.value;
+  if (!artifact || !container) {
+    return;
+  }
+  const root = container.querySelector<HTMLElement>('.doc-content');
+  if (!root) {
+    return;
+  }
+  const baseUrl = artifact.lastVersion?.originalUrl ? safeParseUrl(artifact.lastVersion.originalUrl) : null;
+  if (!baseUrl) {
+    return;
+  }
+  root.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((anchor) => {
+    anchor.removeAttribute('data-doc-disabled');
+    anchor.removeAttribute('aria-disabled');
+    anchor.classList.remove('doc-link--disabled');
+
+    const href = anchor.getAttribute('href');
+    if (!href || href.startsWith('#') || anchor.target === '_blank') {
+      return;
+    }
+
+    let resolved: URL;
+    try {
+      resolved = new URL(href, baseUrl);
+    } catch {
+      return;
+    }
+
+    if (resolved.origin !== baseUrl.origin) {
+      return;
+    }
+
+    const normalized = extractRelativePath(resolved, artifact.lastVersion?.metadata?.versionBasePath);
+    if (!normalized || !state.pathIndex.get(normalized)) {
+      disableAnchor(anchor);
+    }
+  });
+}
+
+const disableAnchor = (anchor: HTMLAnchorElement) => {
+  anchor.setAttribute('data-doc-disabled', 'true');
+  anchor.setAttribute('aria-disabled', 'true');
+  anchor.classList.add('doc-link--disabled');
+};
+
 function handleContentClick(event: MouseEvent) {
   const artifact = selectedArtifact.value;
   if (!artifact?.lastVersion) {
@@ -391,6 +514,11 @@ function handleContentClick(event: MouseEvent) {
   }
   const target = (event.target as HTMLElement)?.closest<HTMLAnchorElement>('a');
   if (!target) {
+    return;
+  }
+  const disabledAnchor = target.closest<HTMLAnchorElement>('a[data-doc-disabled="true"]');
+  if (disabledAnchor) {
+    event.preventDefault();
     return;
   }
   const href = target.getAttribute('href');
@@ -455,19 +583,46 @@ function extractRelativePath(url: URL, basePath?: string | null): string | null 
   return normalizeDocPath(remainder ? `/${remainder}` : '/');
 }
 
+const safeParseUrl = (value: string): URL | null => {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+};
+
 watch(selectedAnchorSlug, (anchor) => {
   if (anchor) {
     scrollToAnchor(anchor);
   }
 });
 
-watch(selectedArtifactId, () => {
+watch(
+  () => props.selectedArtifactId,
+  (next) => {
+    if (!next) {
+      pendingArtifactId.value = null;
+      return;
+    }
+    if (next === selectedArtifactId.value) {
+      return;
+    }
+    pendingArtifactId.value = next;
+    ensureArtifactSelection(next);
+  },
+  { immediate: true }
+);
+
+watch(selectedArtifactId, (next) => {
   if (!selectedAnchorSlug.value) {
     nextTick(() => {
       contentRef.value?.scrollTo({ top: 0, behavior: 'auto' });
     });
   }
   scheduleEmbeddedMediaNormalization();
+  if (next !== props.selectedArtifactId) {
+    emit('update:selectedArtifactId', next);
+  }
 });
 
 watch(renderedHtml, () => {
@@ -483,7 +638,7 @@ watch(
   () => state.selectedSourceId,
   (next) => {
     if (next) {
-      loadArtifactsForSource(next);
+      queueSourceLoad(next);
     }
   }
 );
@@ -524,7 +679,7 @@ watch(
       />
     </div>
 
-    <div class="content-panel">
+    <div class="content-panel" ref="contentRef">
       <div v-if="state.error" class="error">{{ state.error }}</div>
       <template v-else-if="selectedArtifact">
         <header>
@@ -556,12 +711,7 @@ watch(
             </li>
           </ul>
         </div>
-        <article
-          ref="contentRef"
-          class="doc-content"
-          v-html="renderedHtml"
-          @click="handleContentClick"
-        />
+        <article class="doc-content" v-html="renderedHtml" @click="handleContentClick" />
       </template>
       <p v-else class="placeholder">Select a documentation page.</p>
     </div>
@@ -681,6 +831,14 @@ watch(
   max-width: 100%;
   height: auto;
   display: block;
+}
+
+/* Visually flag unharvested links so users do not attempt navigation that the crawler cannot satisfy. */
+.doc-content :deep(a.doc-link--disabled) {
+  color: #9ca3af;
+  pointer-events: none;
+  cursor: not-allowed;
+  text-decoration: none;
 }
 
 .doc-content :deep(pre) {

@@ -58,21 +58,31 @@ onMounted(async () => {
 
 <template>
   <div class="sources-view">
-    <section>
-      <header>
+    <section class="cards-panel">
+      <div class="panel__header">
         <h2>Sources</h2>
         <input v-model="state.search" placeholder="Search" @keyup.enter="loadSources" />
         <button type="button" @click="loadSources" :disabled="state.loading">Refresh</button>
-      </header>
-      <SourceList :sources="state.sources" @select="handleSelect" @delete="handleDelete" />
-      <p v-if="!state.loading">{{ state.total }} total sources</p>
+      </div>
+      <div class="panel__body">
+        <SourceList :sources="state.sources" @select="handleSelect" @delete="handleDelete" />
+        <p v-if="!state.loading">{{ state.total }} total sources</p>
+      </div>
     </section>
 
-    <section>
-      <h2>Create Source</h2>
-      <form @submit="handleSubmit">
-        <SourceForm :plugins="pluginsStore.plugins" v-model="draft" :submitting="submitting" />
-      </form>
+    <section class="create-panel">
+      <div class="create-panel__header">
+        <h2>Create Source</h2>
+      </div>
+      <div class="create-panel__body">
+        <form @submit="handleSubmit">
+          <SourceForm
+            :plugins="pluginsStore.plugins"
+            v-model="draft"
+            :submitting="submitting"
+          />
+        </form>
+      </div>
     </section>
   </div>
 </template>
@@ -84,7 +94,7 @@ onMounted(async () => {
   gap: 2rem;
 }
 
-header {
+.panel__header {
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -103,5 +113,47 @@ button {
   color: #fff;
   padding: 0.4rem 1rem;
   border-radius: 0.375rem;
+}
+
+/* Keep the list card aligned with the Create panel height so scrolling happens inside each column rather than the page. */
+.cards-panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  background: #fff;
+  height: calc(100vh - var(--title-bar-size, 48px) - 2rem - 1rem);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 1rem 1.25rem;
+}
+
+.panel__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Tie into the global layout math so the panel height mirrors plugin rectangles: reserve the title bar + 2rem padding, then subtract the explicit bottom margin so it stays visually consistent. */
+.create-panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  background: #fff;
+  height: calc(100vh - var(--title-bar-size, 48px) - 2rem - 1rem);
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.create-panel__header {
+  padding: 1rem 1.25rem 0.5rem;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.create-panel__body {
+  padding: 1rem 1.25rem;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 </style>

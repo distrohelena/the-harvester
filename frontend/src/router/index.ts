@@ -16,7 +16,7 @@ const router = createRouter({
     { path: '/artifacts', component: ArtifactsView },
     { path: '/artifacts/:id', component: ArtifactDetailView, props: true },
     { path: '/runs', component: RunsView },
-    { path: '/plugins', component: PluginsView }
+    { path: '/plugins/:tab?/:artifactId?', component: PluginsView, props: true }
   ]
 });
 

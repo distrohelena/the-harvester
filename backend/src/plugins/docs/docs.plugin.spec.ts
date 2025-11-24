@@ -151,4 +151,33 @@ describe('DocsPlugin XRPL behavior', () => {
     expect(artifact?.data?.html).toContain('<h1 id="use-cases">');
     expect(artifact?.data?.text).toContain('XRPL offers multiple use cases');
   });
+
+  it('strips generic inline SVG artwork so crawler results stay text-first', () => {
+    const html = `
+      <html>
+        <body>
+          <article>
+            <p>Before the diagram.</p>
+            <svg viewBox="0 0 24 24" role="img">
+              <title>Diagram</title>
+              <circle cx="12" cy="12" r="10"></circle>
+            </svg>
+            <p>After the diagram.</p>
+          </article>
+        </body>
+      </html>
+    `;
+    const $ = cheerio.load(html);
+    const artifact = (plugin as any).buildArtifact(
+      version,
+      '/docs/diagram',
+      $,
+      'https://xrpl.org/docs/diagram',
+      {} as any,
+      baseOptions
+    );
+    expect(artifact?.data?.html).not.toContain('<svg');
+    expect(artifact?.data?.text).toContain('Before the diagram.');
+    expect(artifact?.data?.text).toContain('After the diagram.');
+  });
 });

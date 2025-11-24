@@ -2,9 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import SourceForm from '../components/sources/SourceForm.vue';
-import NavigationRenderer from '../components/navigation/NavigationRenderer.vue';
 import { fetchSource, updateSource, enqueueRun } from '../api/sources';
-import { fetchNavigation } from '../api/navigation';
 import { usePluginsStore } from '../stores/plugins';
 import type { SourceModel } from '../types/plugins';
 
@@ -14,19 +12,14 @@ const pluginsStore = usePluginsStore();
 const source = ref<SourceModel>();
 const draft = ref<Partial<SourceModel>>();
 const loading = ref(false);
-const navigation = ref();
 const running = ref(false);
 
 async function load() {
   loading.value = true;
   try {
-    const [sourcePayload, navigationPayload] = await Promise.all([
-      fetchSource(id),
-      fetchNavigation(id).catch(() => ({ nodes: [] }))
-    ]);
+    const sourcePayload = await fetchSource(id);
     source.value = sourcePayload;
     draft.value = { ...sourcePayload };
-    navigation.value = navigationPayload;
   } finally {
     loading.value = false;
   }
@@ -73,38 +66,63 @@ onMounted(async () => {
 <template>
   <div v-if="loading && !source">Loading…</div>
   <div v-else-if="source" class="source-detail">
-    <section>
-      <header>
+    <section class="source-panel">
+      <div class="source-panel__header">
         <div>
           <h2>{{ source.name }}</h2>
           <p>Plugin: {{ source.pluginKey }}</p>
         </div>
-        <button type="button" @click="triggerRun" :disabled="running">{{ running ? 'Queueing…' : 'Run Now' }}</button>
-      </header>
+        <button type="button" @click="triggerRun" :disabled="running">
+          {{ running ? 'Queueing…' : 'Run Now' }}
+        </button>
+      </div>
 
-      <form @submit="handleSubmit">
-        <SourceForm v-if="draft" :plugins="pluginsStore.plugins" v-model="draft" :submitting="loading" />
-      </form>
+      <div class="source-panel__body">
+        <form @submit="handleSubmit">
+          <SourceForm
+            v-if="draft"
+            :plugins="pluginsStore.plugins"
+            v-model="draft"
+            :submitting="loading"
+          />
+        </form>
+      </div>
     </section>
-
-    <aside>
-      <h3>Navigation</h3>
-      <NavigationRenderer :schema="pluginsStore.findPlugin(source.pluginKey)?.navigationSchema" :payload="navigation" />
-    </aside>
   </div>
 </template>
 
 <style scoped>
+/* Match the global main height budget so the detail view never bleeds into the footer padding. */
 .source-detail {
-  display: grid;
-  grid-template-columns: 2fr 1fr;
-  gap: 2rem;
+  height: calc(100vh - var(--title-bar-size, 48px) - 2rem);
+  min-height: 0;
+  display: flex;
 }
 
-header {
+/* Mirror the block treatment used on the list/create panels so the source editor feels consistent and scrolls internally. */
+.source-panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  background: #fff;
+  width: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.25rem;
+}
+
+.source-panel__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.source-panel__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 button {
@@ -113,12 +131,5 @@ button {
   padding: 0.5rem 1.2rem;
   background: #10b981;
   color: #fff;
-}
-
-aside {
-  border: 1px solid #e5e7eb;
-  border-radius: 0.5rem;
-  padding: 1rem;
-  background: #fff;
 }
 </style>

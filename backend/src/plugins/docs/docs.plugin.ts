@@ -800,6 +800,7 @@ export class DocsPlugin implements Plugin {
     options: NormalizedDocsOptions
   ): NormalizedArtifact | null {
     this.stripPageChrome($);
+    this.stripInlineSvg($);
     this.ensureHeadingAnchors($, options.headingSelectors);
     const title = this.sanitizeTitle(this.pickFirstText($, options.titleSelectors) || 'Untitled');
     const html = this.extractContentHtml($, options);
@@ -860,6 +861,12 @@ export class DocsPlugin implements Plugin {
       'svg[data-component-name*="LinkIcon"]'
     ];
     $(chromeSelectors.join(', ')).remove();
+  }
+
+  private stripInlineSvg($: cheerio.CheerioAPI): void {
+    // The UI renders harvested docs in a shared viewer that should stay text-first;
+    // aggressively remove inline SVG artwork so plugin results remain lightweight.
+    $('svg').remove();
   }
 
   private extractLinks(

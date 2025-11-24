@@ -1,37 +1,110 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import DocsBrowser from '../components/plugins/DocsBrowser.vue';
 import ConfluenceBrowser from '../components/plugins/ConfluenceBrowser.vue';
 import GitBrowser from '../components/plugins/GitBrowser.vue';
 import JiraBrowser from '../components/plugins/JiraBrowser.vue';
 
-const activeTab = ref<'docs' | 'confluence' | 'git' | 'jira'>('docs');
+type TabKey = 'docs' | 'confluence' | 'git' | 'jira';
+const props = defineProps<{ tab?: string; artifactId?: string }>();
+const router = useRouter();
+
+// Drive the plugin tabs from the URL so docs pages can provide deep links like /plugins/docs/:artifactId.
+const resolveTab = (value?: string): TabKey => {
+  const normalized = (value ?? '').toLowerCase();
+  if (normalized === 'confluence' || normalized === 'git' || normalized === 'jira') {
+    return normalized;
+  }
+  return 'docs';
+};
+
+const artifactPath = (tab: TabKey, artifactId?: string) => {
+  if (tab !== 'docs') {
+    return `/plugins/${tab}`;
+  }
+  return artifactId ? `/plugins/docs/${artifactId}` : '/plugins/docs';
+};
+
+const activeTab = ref<TabKey>(resolveTab(props.tab));
+const lastDocsArtifactId = ref<string | undefined>(props.artifactId);
+
+watch(
+  () => props.tab,
+  (next) => {
+    const resolved = resolveTab(typeof next === 'string' ? next : undefined);
+    if (activeTab.value !== resolved) {
+      activeTab.value = resolved;
+    }
+    if (next !== resolved) {
+      router.replace(artifactPath(resolved, resolved === 'docs' ? props.artifactId : undefined));
+    }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.artifactId,
+  (next) => {
+    if (next) {
+      lastDocsArtifactId.value = next;
+    }
+  },
+  { immediate: true }
+);
+
+const docArtifactId = computed(() => (activeTab.value === 'docs' ? props.artifactId : undefined));
+
+function setTab(tab: TabKey) {
+  if (tab === activeTab.value) {
+    if (tab === 'docs') {
+      router.replace(artifactPath('docs', props.artifactId ?? lastDocsArtifactId.value));
+    }
+    return;
+  }
+  activeTab.value = tab;
+  if (tab === 'docs') {
+    router.push(artifactPath('docs', lastDocsArtifactId.value));
+  } else {
+    router.push(artifactPath(tab));
+  }
+}
+
+function handleDocsSelection(artifactId?: string) {
+  // Keep the docs browser URL shareable by reflecting the current artifact id in the route.
+  lastDocsArtifactId.value = artifactId;
+  router.replace(artifactPath('docs', artifactId));
+}
 </script>
 
 <template>
   <div class="plugins-view">
     <div class="tab-bar">
-      <button type="button" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">
+      <button type="button" :class="{ active: activeTab === 'docs' }" @click="setTab('docs')">
         Documentation
       </button>
       <button
         type="button"
         :class="{ active: activeTab === 'confluence' }"
-        @click="activeTab = 'confluence'"
+        @click="setTab('confluence')"
       >
         Confluence
       </button>
-      <button type="button" :class="{ active: activeTab === 'git' }" @click="activeTab = 'git'">
+      <button type="button" :class="{ active: activeTab === 'git' }" @click="setTab('git')">
         Git
       </button>
-      <button type="button" :class="{ active: activeTab === 'jira' }" @click="activeTab = 'jira'">
+      <button type="button" :class="{ active: activeTab === 'jira' }" @click="setTab('jira')">
         Jira
       </button>
     </div>
 
     <section class="tab-content">
       <div v-if="activeTab === 'docs'" class="tab-panel">
-        <DocsBrowser class="tab-panel__content" />
+        <DocsBrowser
+          class="tab-panel__content"
+          :selected-artifact-id="docArtifactId"
+          @update:selected-artifact-id="handleDocsSelection"
+        />
       </div>
       <div v-else-if="activeTab === 'confluence'" class="tab-panel">
         <ConfluenceBrowser class="tab-panel__content" />
