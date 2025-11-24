@@ -70,6 +70,21 @@ The repo ships with `.devcontainer/` assets so you can launch a pre-wired enviro
 
 After the container initializes, the `postCreateCommand` automatically installs backend and frontend dependencies, so you can run `npm run start:dev` / `npm run dev` immediately.
 
+### Environment Profiles
+Copy the provided example env files to switch between running inside the Dev Container and running commands directly on your host while still using the same Dockerized Postgres/Redis services:
+
+```bash
+# Backend
+cp backend/.env.devcontainer.example backend/.env      # when running inside the workspace container
+cp backend/.env.host.example backend/.env             # when running on your host
+
+# Frontend
+cp frontend/.env.devcontainer.example frontend/.env   # devserver inside the container (set VITE_API_URL to host.docker.internal if the backend runs on your host)
+cp frontend/.env.host.example frontend/.env           # devserver on your host
+```
+
+Each example sets the correct `DATABASE_URL`, `REDIS_URL`, and Vite proxy target for its environment so you only need to tweak the files when your backend lives somewhere other than the defaults listed.
+
 ## Documentation Plugin
 The `docs` plugin now understands versioned documentation portals:
 
